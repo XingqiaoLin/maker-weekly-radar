@@ -2,7 +2,7 @@
 
 Maker Weekly Radar is a Codex Skill and Plugin for producing a rigorously sourced weekly Top 15 of physical Maker Projects.
 
-It searches up to 13 public platforms, takes each platform's strongest five candidates, verifies platform-specific heat thresholds, distinguishes first releases from weekly breakouts using snapshots, applies five mandatory review gates and three red lines, and ranks the survivors on a 30-point editorial score. Fewer than 15 projects are returned when the evidence is insufficient.
+It searches up to 13 public platforms, keeps only projects first published in the target natural week, takes each platform's strongest five eligible candidates, verifies platform-specific heat thresholds, applies five mandatory review gates and three red lines, and ranks the survivors on a 30-point editorial score. Fewer than 15 projects are returned when the evidence is insufficient.
 
 ## What Codex can do with it
 
@@ -10,7 +10,7 @@ It searches up to 13 public platforms, takes each platform's strongest five cand
 - Collect from Kickstarter, Indiegogo, GitHub, Hackaday, Hackster, Instructables, YouTube, Reddit, X, Instagram, Make Magazine, The Verge, and Tom's Hardware.
 - Use public no-key collection where it is reliable, with optional official API providers.
 - Verify public heat metrics instead of treating feed position as popularity.
-- Preserve weekly snapshots for defensible first-release and breakout classification.
+- Reject old projects even when they were updated, resurfaced, or crossed a heat threshold this week.
 - Merge cross-platform duplicates and render at most 15 evidence-backed winners.
 
 ## Install as a Codex Skill

@@ -110,6 +110,43 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertEqual([item["title"] for item in items], ["maker/printable-arm"])
         self.assertIn("created%3A2026-08-05..2026-08-12", request.call_args.args[0])
 
+    def test_publication_window_rejects_old_project_updated_this_week(self):
+        old = {"published_at": "2018-06-29T23:57:16Z", "metrics": {"pushed_at": "2026-08-06T15:43:16Z"}}
+        new = {"published_at": "2026-08-06T12:00:00Z"}
+        since = datetime(2026, 8, 3, tzinfo=timezone.utc)
+        as_of = datetime(2026, 8, 9, 23, 59, 59, tzinfo=timezone.utc)
+        self.assertFalse(maker_weekly.publication_is_in_window(old, since, as_of))
+        self.assertTrue(maker_weekly.publication_is_in_window(new, since, as_of))
+
+    def test_verified_social_heat_gates(self):
+        youtube_low = {"platform": "YouTube", "metrics": {"views": 199999, "channel_subscribers": 49999}, "metric_verification": {"status": "ok"}}
+        youtube_channel = {"platform": "YouTube", "metrics": {"views": 10, "channel_subscribers": 50000}, "metric_verification": {"status": "ok"}}
+        reddit_low = {"platform": "Reddit", "metrics": {"score": 4900, "comments": 99}, "metric_verification": {"status": "ok"}}
+        reddit_pass = {"platform": "Reddit", "metrics": {"score": 4900, "comments": 100}, "metric_verification": {"status": "ok"}}
+        self.assertFalse(maker_weekly.verified_platform_heat_passes(youtube_low))
+        self.assertTrue(maker_weekly.verified_platform_heat_passes(youtube_channel))
+        self.assertFalse(maker_weekly.verified_platform_heat_passes(reddit_low))
+        self.assertTrue(maker_weekly.verified_platform_heat_passes(reddit_pass))
+
+    def test_reddit_rss_excludes_question_posts_before_enrichment(self):
+        feed = b"""<feed xmlns='http://www.w3.org/2005/Atom'>
+        <entry><title>What's the most useful thing you have built?</title><link href='https://www.reddit.com/r/maker/comments/question001/example/'/><published>2026-08-07T00:00:00Z</published></entry>
+        <entry><title>I built a working robot from scratch</title><link href='https://www.reddit.com/r/maker/comments/project001/example/'/><published>2026-08-07T00:00:00Z</published></entry>
+        </feed>"""
+        source = {
+            "id": "reddit-rss", "type": "rss", "platform": "Reddit", "feed_url": "https://reddit.test/feed",
+            "required_patterns": [r"\b(i|we)\s+(built|made|designed|created)\b"],
+            "excluded_patterns": [r"\bwhat.s\b"],
+        }
+        context = {
+            "timeout": 10, "limit": 5, "since": datetime(2026, 8, 3, tzinfo=timezone.utc),
+            "as_of": datetime(2026, 8, 9, 23, 59, 59, tzinfo=timezone.utc),
+            "lookback_days": 7, "keywords": [],
+        }
+        with mock.patch.object(maker_weekly, "request_bytes", return_value=feed):
+            items = maker_weekly.collect_rss(source, context)
+        self.assertEqual([item["title"] for item in items], ["I built a working robot from scratch"])
+
     def test_rss_bundle_merges_feeds_before_source_cap(self):
         first = b"""<feed xmlns='http://www.w3.org/2005/Atom'><entry><title>Printed arm</title><link href='https://one.test/arm'/><published>2026-08-11T00:00:00Z</published><summary>3D print project</summary></entry></feed>"""
         second = b"""<feed xmlns='http://www.w3.org/2005/Atom'><entry><title>Printed gearbox</title><link href='https://two.test/gear'/><published>2026-08-10T00:00:00Z</published><summary>3D printer STL</summary></entry></feed>"""

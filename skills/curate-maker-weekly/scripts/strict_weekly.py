@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enforce Maker Weekly natural-week, snapshot, gate, and report rules."""
+"""Enforce Maker Weekly natural-week, first-publication, gate, and report rules."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import maker_weekly
 
 
 CATEGORIES = {"社会价值", "极客硬核", "艺术科技交互", "生活方式社群"}
-ENTRY_TYPES = {"first_release", "breakout"}
+ENTRY_TYPES = {"first_release"}
 EXCELLENCE_DIRECTIONS = {"technical_engineering", "creative_play", "value_resonance"}
 PROJECT_GATE_KEYS = {"multi_stage", "significant_investment", "real_challenge", "real_motivation"}
 NECESSARY_KEYS = {"small_team_led", "what_and_why", "built_or_substantive_progress"}
@@ -56,7 +56,6 @@ def last_complete_week(today: date) -> dict[str, str]:
     return {
         "week_start": start_day.isoformat(),
         "week_end": end_day.isoformat(),
-        "previous_snapshot_date": (start_day - timedelta(days=1)).isoformat(),
         "execution_date": today.isoformat(),
         "timezone": "UTC",
     }
@@ -123,46 +122,26 @@ def heat_gate(item: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def snapshot_index(snapshot: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
-    if not snapshot:
-        return {}
-    return {
-        str(item.get("canonical_url") or maker_weekly.canonical_url(str(item.get("url") or ""))): item
-        for item in snapshot.get("items", []) if isinstance(item, dict)
-    }
-
-
-def annotate_time(
-    item: dict[str, Any], start: datetime, end: datetime, previous: dict[str, dict[str, Any]], has_snapshot: bool,
-) -> dict[str, Any]:
+def annotate_time(item: dict[str, Any], start: datetime, end: datetime) -> dict[str, Any]:
     published = maker_weekly.parse_datetime(item.get("published_at"))
     if published and start <= published <= end:
         return {"status": "pass", "entry_type": "first_release", "reason": "原始页面发布时间位于目标自然周"}
-    key = maker_weekly.canonical_url(str(item.get("url") or ""))
-    prior = previous.get(key)
-    if prior:
-        previous_heat = prior.get("heat_gate") or {}
-        if previous_heat.get("status") == "pass":
-            return {"status": "fail", "entry_type": None, "reason": "上周快照已经达标，不能标记本周翻红", "previous_heat": previous_heat}
-        return {"status": "pending", "entry_type": "breakout", "reason": "上周快照存在且未达标；需证明本周首次达标", "previous_heat": previous_heat}
-    if has_snapshot:
-        return {"status": "fail", "entry_type": None, "reason": "上周快照无该候选，无法证明本周首次翻红"}
-    return {"status": "fail", "entry_type": None, "reason": "基线运行无上周快照，旧项目不得追溯标记翻红"}
+    if published:
+        return {"status": "fail", "entry_type": None, "reason": "原始发布时间不在目标自然周；旧项目本周更新或重新传播也不接受"}
+    return {"status": "fail", "entry_type": None, "reason": "无法核验原始发布时间；严格本周首发规则下淘汰"}
 
 
-def prepare_payload(payload: dict[str, Any], start: datetime, end: datetime, previous_snapshot: dict[str, Any] | None) -> dict[str, Any]:
+def prepare_payload(payload: dict[str, Any], start: datetime, end: datetime) -> dict[str, Any]:
     result = deepcopy(payload)
-    previous = snapshot_index(previous_snapshot)
     for item in result.get("items", []):
         item["canonical_url"] = maker_weekly.canonical_url(str(item.get("url") or ""))
         item["heat_gate"] = heat_gate(item)
-        item["time_gate"] = annotate_time(item, start, end, previous, previous_snapshot is not None)
+        item["time_gate"] = annotate_time(item, start, end)
     statuses = result.get("source_status") or []
     result["week"] = {
         "start": maker_weekly.iso_z(start), "end": maker_weekly.iso_z(end),
-        "previous_snapshot_date": (start.date() - timedelta(days=1)).isoformat(),
         "execution_date": datetime.now(timezone.utc).date().isoformat(), "timezone": "UTC",
-        "baseline": previous_snapshot is None,
+        "strict_current_week_only": True,
     }
     result["issue_stats"] = {
         "platforms_attempted": len([status for status in statuses if status.get("status") != "disabled"]),
@@ -211,15 +190,10 @@ def validate_decision(decision: dict[str, Any], candidate: dict[str, Any], start
         errors.append("invalid category")
     entry_type = decision.get("entry_type")
     if entry_type not in ENTRY_TYPES:
-        errors.append("entry_type must be first_release or breakout")
+        errors.append("entry_type must be first_release")
     published = maker_weekly.parse_datetime(candidate.get("published_at"))
     if entry_type == "first_release" and not (published and start <= published <= end):
         errors.append("first_release requires an original publication date inside the target week")
-    if entry_type == "breakout":
-        time_gate = candidate.get("time_gate") or {}
-        previous_heat = decision.get("previous_heat") or time_gate.get("previous_heat") or {}
-        if time_gate.get("entry_type") != "breakout" or previous_heat.get("status") == "pass":
-            errors.append("breakout requires a matching previous snapshot below threshold")
     gate = decision.get("heat_gate")
     if not isinstance(gate, dict) or gate.get("status") != "pass" or not gate.get("observed") or not gate.get("threshold") or not gate.get("captured_at") or not is_http_url(gate.get("evidence_url")):
         errors.append("heat_gate must pass with observed value, threshold, capture time, and evidence URL")
@@ -305,7 +279,6 @@ def select_payload(researched: dict[str, Any], decisions: dict[str, Any]) -> dic
     stats.update({
         "selected_projects": len(selected),
         "first_release_count": sum(item["entry_type"] == "first_release" for item in selected),
-        "breakout_count": sum(item["entry_type"] == "breakout" for item in selected),
     })
     return {
         "schema_version": 1, "selection_method": "maker-weekly-strict-v1", "week": week,
@@ -339,7 +312,7 @@ def direction_label(value: str) -> str:
 
 
 def entry_label(value: str) -> str:
-    return {"first_release": "本周首发", "breakout": "本周翻红"}.get(value, value)
+    return {"first_release": "本周首发"}.get(value, value)
 
 
 def render(payload: dict[str, Any]) -> str:
@@ -351,8 +324,7 @@ def render(payload: dict[str, Any]) -> str:
         f"- 尝试平台：{stats.get('platforms_attempted', stats.get('platforms_searched', 0))}；失败或受限：{stats.get('platforms_failed', 0)}",
         f"- 初始候选数量：{stats.get('initial_candidates', 0)}",
         f"- 通过全部标准：{stats.get('selected_projects', 0)}",
-        f"- 本周首发：{stats.get('first_release_count', 0)}",
-        f"- 本周翻红：{stats.get('breakout_count', 0)}", "",
+        f"- 本周首发：{stats.get('first_release_count', 0)}", "",
     ]
     for item in payload.get("items", []):
         decision = item
@@ -366,9 +338,6 @@ def render(payload: dict[str, Any]) -> str:
             f"- 首次发现日期：{decision['first_seen_date']}",
             f"- 本周热度：{gate['observed']}；门槛：{gate['threshold']}；抓取：{gate['captured_at']}；证据：{gate['evidence_url']}",
         ])
-        if decision["entry_type"] == "breakout":
-            previous = decision.get("previous_heat") or (decision.get("time_gate") or {}).get("previous_heat") or {}
-            lines.append(f"- 上周热度：{previous.get('observed', '无法验证')}")
         lines.extend([
             f"- 创作者：{creator['name']}；{creator['background']}；证据：{', '.join(creator['evidence_urls'])}",
             f"- 项目简介：{decision['project_description']}",
@@ -413,7 +382,6 @@ def parser() -> argparse.ArgumentParser:
     prepare.add_argument("--output", required=True, type=Path)
     prepare.add_argument("--week-start", required=True)
     prepare.add_argument("--week-end", required=True)
-    prepare.add_argument("--previous-snapshot", type=Path)
     snapshot = sub.add_parser("snapshot")
     snapshot.add_argument("--input", required=True, type=Path)
     snapshot.add_argument("--output", required=True, type=Path)
@@ -437,8 +405,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(last_complete_week(today), ensure_ascii=False, indent=2))
         elif args.command == "prepare":
             start, end = week_bounds(args.week_start, args.week_end)
-            previous = maker_weekly.read_json(args.previous_snapshot) if args.previous_snapshot else None
-            payload = prepare_payload(maker_weekly.read_json(args.input), start, end, previous)
+            payload = prepare_payload(maker_weekly.read_json(args.input), start, end)
             maker_weekly.write_json(args.output, payload)
             print(f"prepared {len(payload.get('items', []))} candidates -> {args.output}")
         elif args.command == "snapshot":

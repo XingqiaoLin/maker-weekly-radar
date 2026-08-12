@@ -1,5 +1,6 @@
 {
   "lookback_days": 7,
+  "strict_current_week_only": true,
   "top_per_source": 5,
   "final_top": 15,
   "request_timeout_seconds": 20,
@@ -18,7 +19,7 @@
         "wearable hardware in:name,description,readme"
       ],
       "required_terms": ["open hardware", "open-hardware", "robot", "hardware", "3d print", "3d-print", "wearable", "mechanical", "electronics", "fabrication"],
-      "date_qualifier": "pushed",
+      "date_qualifier": "created",
       "token_env": "GITHUB_TOKEN"
     },
     {
@@ -27,6 +28,9 @@
       "enabled": true,
       "platform": "YouTube",
       "detail_enrichment": "youtube_public",
+      "required_patterns": ["\\b(diy|build|built|making|made|project|robot|device|machine|printer|from scratch)\\b"],
+      "excluded_patterns": ["\\b(burn|filament|material|stress)\\s+test\\b"],
+      "verified_heat_only": true,
       "detail_candidate_limit": 20,
       "detail_workers": 4,
       "feed_urls": [
@@ -43,6 +47,9 @@
       "enabled": true,
       "platform": "Reddit",
       "detail_enrichment": "reddit_old",
+      "required_patterns": ["\\b((i|we)\\s+(built|made|designed|created)|my\\s+(build|project|design|creation)|made\\s+a|built\\s+from\\s+scratch|3d[- ]printed|diy|prototype|robot|device|machine|sculpture|installation)\\b"],
+      "excluded_patterns": ["\\b(what.s|what is|question|help|advice|recommend|anyone|how do i|should i)\\b"],
+      "verified_heat_only": true,
       "detail_candidate_limit": 20,
       "detail_workers": 4,
       "feed_urls": [

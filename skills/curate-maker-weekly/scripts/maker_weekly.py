@@ -237,6 +237,26 @@ def cap_and_rank(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]
     return ordered
 
 
+def publication_is_in_window(item: dict[str, Any], since: datetime, as_of: datetime) -> bool:
+    """Return true only when the original publication timestamp is known and in range."""
+    published = parse_datetime(item.get("published_at"))
+    return bool(published and since <= published <= as_of)
+
+
+def verified_platform_heat_passes(item: dict[str, Any]) -> bool:
+    """Apply public YouTube/Reddit heat gates before a platform Top 5 is chosen."""
+    verification = item.get("metric_verification") or {}
+    if verification.get("status") != "ok":
+        return False
+    metrics = item.get("metrics") or {}
+    platform = str(item.get("platform") or "").lower()
+    if "youtube" in platform:
+        return int(metrics.get("views") or 0) >= 200_000 or int(metrics.get("channel_subscribers") or 0) >= 50_000
+    if "reddit" in platform:
+        return int(metrics.get("score") or 0) + int(metrics.get("comments") or 0) >= 5_000
+    raise ConfigError("verified_heat_only currently supports YouTube and Reddit sources")
+
+
 def collect_github(source: dict[str, Any], context: dict[str, Any]) -> list[dict[str, Any]]:
     headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
     token_name = str(source.get("token_env") or "GITHUB_TOKEN")
@@ -1031,6 +1051,8 @@ def collect_rss(source: dict[str, Any], context: dict[str, Any]) -> list[dict[st
     if any(not value.startswith(("http://", "https://")) for value in urls):
         raise ConfigError("rss feed URLs must use http(s)")
     required_keywords = [str(word).lower() for word in source.get("keywords") or []]
+    required_patterns = [re.compile(str(pattern), re.IGNORECASE) for pattern in source.get("required_patterns") or []]
+    excluded_patterns = [re.compile(str(pattern), re.IGNORECASE) for pattern in source.get("excluded_patterns") or []]
     static_metrics = source.get("static_metrics") or {}
     if not isinstance(static_metrics, dict):
         raise ConfigError("rss static_metrics must be an object")
@@ -1049,6 +1071,10 @@ def collect_rss(source: dict[str, Any], context: dict[str, Any]) -> list[dict[st
             summary = child_value(entry, {"description", "summary", "content", "encoded"})
             haystack = f"{clean_text(title)} {clean_text(summary)}".lower()
             if required_keywords and not any(word in haystack for word in required_keywords):
+                continue
+            if required_patterns and not any(pattern.search(haystack) for pattern in required_patterns):
+                continue
+            if excluded_patterns and any(pattern.search(haystack) for pattern in excluded_patterns):
                 continue
             link = child_value(entry, {"link"})
             if not link:
@@ -1083,6 +1109,8 @@ def collect_rss(source: dict[str, Any], context: dict[str, Any]) -> list[dict[st
             reverse=True,
         )[:detail_limit]
     enrich_rss_details(source, results, context["timeout"])
+    if source.get("verified_heat_only"):
+        results = [item for item in results if verified_platform_heat_passes(item)]
     return results
 
 
@@ -1218,8 +1246,9 @@ def collect_envelope(config_path: Path, as_of: datetime, source_ids: set[str] | 
     lookback_days = int(config.get("lookback_days", 7))
     limit = int(config.get("top_per_source", 5))
     keywords = [str(word) for word in config.get("keywords") or []]
+    window_start = (as_of - timedelta(days=max(0, lookback_days - 1))).replace(hour=0, minute=0, second=0, microsecond=0)
     context = {
-        "as_of": as_of, "since": as_of - timedelta(days=lookback_days), "lookback_days": lookback_days,
+        "as_of": as_of, "since": window_start, "lookback_days": lookback_days,
         "limit": limit, "timeout": int(config.get("request_timeout_seconds", 20)), "keywords": [word.lower() for word in keywords],
         "config_dir": config_path.resolve().parent,
     }
@@ -1232,6 +1261,8 @@ def collect_envelope(config_path: Path, as_of: datetime, source_ids: set[str] | 
             continue
         try:
             raw_items = COLLECTORS[source["type"]](source, context)
+            if config.get("strict_current_week_only", True):
+                raw_items = [item for item in raw_items if publication_is_in_window(item, context["since"], context["as_of"])]
             items = cap_and_rank(raw_items, limit)
             collected.extend(items)
             statuses.append({"source_id": source["id"], "platform": source.get("platform", source["id"]), "status": "ok", "count": len(items)})
@@ -1253,7 +1284,13 @@ def collect_envelope(config_path: Path, as_of: datetime, source_ids: set[str] | 
         "as_of": iso_z(as_of),
         "window_start": iso_z(context["since"]),
         "selection_method": "unranked-candidates",
-        "config_summary": {"lookback_days": lookback_days, "top_per_source": limit, "final_top": int(config.get("final_top", 15)), "keywords": keywords},
+        "config_summary": {
+            "lookback_days": lookback_days,
+            "strict_current_week_only": bool(config.get("strict_current_week_only", True)),
+            "top_per_source": limit,
+            "final_top": int(config.get("final_top", 15)),
+            "keywords": keywords,
+        },
         "source_status": statuses,
         "items": unique,
     }

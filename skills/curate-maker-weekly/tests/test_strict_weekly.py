@@ -14,7 +14,7 @@ class StrictWeeklyTests(unittest.TestCase):
         window = strict_weekly.last_complete_week(date(2026, 8, 12))
         self.assertEqual(window["week_start"], "2026-08-03")
         self.assertEqual(window["week_end"], "2026-08-09")
-        self.assertEqual(window["previous_snapshot_date"], "2026-08-02")
+        self.assertNotIn("previous_snapshot_date", window)
 
     def test_heat_gates_are_hard_thresholds(self):
         github = strict_weekly.heat_gate({"platform": "GitHub", "metrics": {"stars": 999}, "url": "https://github.com/x/y"})
@@ -24,7 +24,7 @@ class StrictWeeklyTests(unittest.TestCase):
         self.assertEqual(kickstarter["status"], "pass")
         self.assertEqual(youtube_rss["status"], "unknown")
 
-    def test_baseline_allows_only_first_release_time_classification(self):
+    def test_time_gate_allows_only_current_week_first_release(self):
         payload = {
             "source_status": [{"status": "ok", "platform": "GitHub"}],
             "items": [
@@ -33,10 +33,20 @@ class StrictWeeklyTests(unittest.TestCase):
             ],
         }
         start, end = strict_weekly.week_bounds("2026-08-03", "2026-08-09")
-        prepared = strict_weekly.prepare_payload(payload, start, end, None)
+        prepared = strict_weekly.prepare_payload(payload, start, end)
         self.assertEqual(prepared["items"][0]["time_gate"]["entry_type"], "first_release")
         self.assertEqual(prepared["items"][1]["time_gate"]["status"], "fail")
-        self.assertTrue(prepared["week"]["baseline"])
+        self.assertIn("旧项目本周更新或重新传播也不接受", prepared["items"][1]["time_gate"]["reason"])
+        self.assertTrue(prepared["week"]["strict_current_week_only"])
+
+    def test_breakout_decision_is_rejected(self):
+        candidate = {
+            "id": "old", "platform": "GitHub", "title": "Old project",
+            "url": "https://github.com/a/old", "published_at": "2020-01-01T00:00:00Z",
+        }
+        start, end = strict_weekly.week_bounds("2026-08-03", "2026-08-09")
+        errors = strict_weekly.validate_decision({"entry_type": "breakout"}, candidate, start, end)
+        self.assertIn("entry_type must be first_release", errors)
 
     def test_select_valid_strict_project(self):
         candidate = {

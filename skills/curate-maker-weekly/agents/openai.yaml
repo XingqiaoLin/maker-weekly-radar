@@ -1,7 +1,7 @@
 interface:
   display_name: "Maker 周报研究与严格评审"
   short_description: "跨 13 个平台核验并筛选全球实体 Maker Project Top 15"
-  default_prompt: "使用 $curate-maker-weekly 检索最近完整自然周的全球实体 Maker Project，核验热度、原创性、落地证据与周快照，并输出最多 15 个项目。"
+  default_prompt: "使用 $curate-maker-weekly 检索最近完整自然周首次发布的全球实体 Maker Project，核验发布时间、热度、原创性与落地证据，并输出最多 15 个项目。"
 
 policy:
   allow_implicit_invocation: true
