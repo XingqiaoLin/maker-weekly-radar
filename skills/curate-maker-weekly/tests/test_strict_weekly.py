@@ -57,8 +57,11 @@ class StrictWeeklyTests(unittest.TestCase):
             "canonical_url": "https://github.com/maker/arm",
             "published_at": "2026-08-05T10:00:00Z",
             "metrics": {"stars": 1200},
+            "metrics_captured_at": "2026-08-09T23:00:00Z",
             "evidence": ["https://github.com/maker/arm"],
             "time_gate": {"status": "pass", "entry_type": "first_release"},
+            "heat_gate": {"status": "pass", "observed": "stars=1200", "threshold": "1,000 Stars", "captured_at": "2026-08-09T23:00:00Z", "evidence_url": "https://github.com/maker/arm"},
+            "physical_gate": {"status": "pass", "checks": {"creator_made_physical": True, "physical_is_core": True, "built_result_visible": True, "human_process_visible": True}, "evidence": [{"type": "video", "url": "https://github.com/maker/arm"}]},
         }
         researched = {
             "week": {"start": "2026-08-03T00:00:00Z", "end": "2026-08-09T23:59:59Z", "timezone": "UTC"},
@@ -99,6 +102,18 @@ class StrictWeeklyTests(unittest.TestCase):
         self.assertEqual(final["issue_stats"]["first_release_count"], 1)
         self.assertEqual(strict_weekly.validate_final(final), [])
         self.assertIn("Open hardware arm", strict_weekly.render(final))
+
+    def test_raw_or_failed_gate_items_cannot_enter_final_report(self):
+        payload = {
+            "schema_version": 1, "selection_method": "maker-weekly-strict-v1",
+            "week": {"start": "2026-08-03T00:00:00Z", "end": "2026-08-09T23:59:59Z", "timezone": "UTC"},
+            "issue_stats": {"selected_projects": 1},
+            "items": [{"rank": 1, "title": "Raw software discovery", "total_score": 30, "physical_gate": {"status": "fail"}, "time_gate": {"status": "pass"}, "heat_gate": {"status": "pass"}}],
+        }
+        errors = strict_weekly.validate_final(payload)
+        self.assertTrue(any("physical, time, and heat" in error for error in errors))
+        with self.assertRaises(strict_weekly.StrictError):
+            strict_weekly.render(payload)
 
 
 if __name__ == "__main__":

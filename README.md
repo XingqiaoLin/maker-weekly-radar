@@ -2,7 +2,7 @@
 
 Maker Weekly Radar is a Codex Skill and Plugin for producing a rigorously sourced weekly Top 15 of physical Maker Projects.
 
-It searches up to 13 public platforms, keeps only projects first published in the target natural week, takes each platform's strongest five eligible candidates, verifies platform-specific heat thresholds, applies five mandatory review gates and three red lines, and ranks the survivors on a 30-point editorial score. Fewer than 15 projects are returned when the evidence is insufficient.
+It searches 13 public platforms, preserves raw discoveries for audit, requires direct evidence of a real physical build before time/heat ranking, then takes each platform's strongest five eligible candidates. Five mandatory review gates, three red lines, and a 30-point editorial score determine the final list. Fewer than 15 projects are returned when the evidence is insufficient.
 
 ## What Codex can do with it
 
@@ -36,10 +36,12 @@ The repository also contains `.codex-plugin/plugin.json`, so the same package ca
 
 ```bash
 cp skills/curate-maker-weekly/assets/config.example.json maker-weekly.json
-python3 skills/curate-maker-weekly/scripts/maker_weekly.py collect \
+python3 skills/curate-maker-weekly/scripts/maker_weekly.py run \
   --config maker-weekly.json \
-  --output output/candidates.json
+  --output-dir output
 ```
+
+This writes `raw-discoveries.json`, `physical-candidates.json`, `researched.json`, and an explicitly non-publishable raw audit report. Only strict validated selections may become `final.json`.
 
 The collector fails closed when a platform blocks anonymous access or does not expose verifiable metrics. It does not bypass CAPTCHAs, login walls, rate limits, or Cloudflare challenges. See `skills/curate-maker-weekly/references/providers.md` for provider behavior and optional credentials.
 

@@ -135,19 +135,26 @@ def prepare_payload(payload: dict[str, Any], start: datetime, end: datetime) -> 
     result = deepcopy(payload)
     for item in result.get("items", []):
         item["canonical_url"] = maker_weekly.canonical_url(str(item.get("url") or ""))
-        item["heat_gate"] = heat_gate(item)
+        item["heat_gate"] = maker_weekly.evaluate_heat_gate(item, end)
         item["time_gate"] = annotate_time(item, start, end)
     statuses = result.get("source_status") or []
+    stage_counts = result.get("stage_counts") if isinstance(result.get("stage_counts"), dict) else {}
+    covered = {str(status.get("platform") or "").lower(): status.get("status") for status in statuses}
+    missing_social = [name for name in ("YouTube", "Reddit") if covered.get(name.lower()) not in {"ok", "empty"}]
     result["week"] = {
         "start": maker_weekly.iso_z(start), "end": maker_weekly.iso_z(end),
         "execution_date": datetime.now(timezone.utc).date().isoformat(), "timezone": "UTC",
         "strict_current_week_only": True,
     }
     result["issue_stats"] = {
-        "platforms_attempted": len([status for status in statuses if status.get("status") != "disabled"]),
-        "platforms_searched": len([status for status in statuses if status.get("status") == "ok"]),
+        "platforms_attempted": len(statuses),
+        "platforms_searched": len([status for status in statuses if status.get("status") in {"ok", "empty"}]),
         "platforms_failed": len([status for status in statuses if status.get("status") in {"blocked", "error", "skipped"}]),
-        "initial_candidates": len(result.get("items", [])),
+        "raw_discoveries": int(stage_counts.get("raw_discoveries", len(result.get("items", [])))),
+        "physical_prefilter_passed": int(stage_counts.get("physical_prefilter_passed", len(result.get("items", [])))),
+        "heat_gate_passed": int(stage_counts.get("heat_gate_passed", len(result.get("items", [])))),
+        "initial_candidates": int(stage_counts.get("editorial_candidates", len(result.get("items", [])))),
+        "coverage_warning": f"本期平台覆盖不完整：{'/'.join(missing_social)} 未检索" if missing_social else "",
     }
     result["selection_method"] = "strict-research-pending"
     return result
@@ -186,6 +193,12 @@ def passed_evidence_map(value: Any, required: set[str], label: str, errors: list
 
 def validate_decision(decision: dict[str, Any], candidate: dict[str, Any], start: datetime, end: datetime) -> list[str]:
     errors: list[str] = []
+    if candidate.get("physical_gate", {}).get("status") != "pass":
+        errors.append("candidate must pass Make Something Gate before editorial review")
+    if candidate.get("time_gate", {}).get("status") != "pass":
+        errors.append("candidate must pass the pipeline time gate")
+    if candidate.get("heat_gate", {}).get("status") != "pass":
+        errors.append("candidate must pass the pipeline platform heat gate")
     if decision.get("category") not in CATEGORIES:
         errors.append("invalid category")
     entry_type = decision.get("entry_type")
@@ -197,6 +210,8 @@ def validate_decision(decision: dict[str, Any], candidate: dict[str, Any], start
     gate = decision.get("heat_gate")
     if not isinstance(gate, dict) or gate.get("status") != "pass" or not gate.get("observed") or not gate.get("threshold") or not gate.get("captured_at") or not is_http_url(gate.get("evidence_url")):
         errors.append("heat_gate must pass with observed value, threshold, capture time, and evidence URL")
+    elif (captured := maker_weekly.parse_datetime(gate.get("captured_at"))) is None or captured > end:
+        errors.append("heat_gate capture time must be on or before the issue cutoff")
     category_gate = decision.get("category_gate")
     if not isinstance(category_gate, dict) or category_gate.get("passed") is not True or not category_gate.get("evidence") or not is_http_url(category_gate.get("evidence_url")):
         errors.append("category_gate must prove a physical core with an evidence URL")
@@ -301,6 +316,9 @@ def validate_final(payload: dict[str, Any]) -> list[str]:
         errors.append("items must be sorted by total_score descending")
     if [item.get("rank") for item in items] != list(range(1, len(items) + 1)):
         errors.append("ranks must be contiguous from 1")
+    for index, item in enumerate(items, 1):
+        if item.get("physical_gate", {}).get("status") != "pass" or item.get("time_gate", {}).get("status") != "pass" or item.get("heat_gate", {}).get("status") != "pass":
+            errors.append(f"item {index} must retain passing physical, time, and heat gates")
     stats = payload.get("issue_stats") or {}
     if stats.get("selected_projects") != len(items):
         errors.append("issue_stats.selected_projects does not match items")
@@ -316,6 +334,9 @@ def entry_label(value: str) -> str:
 
 
 def render(payload: dict[str, Any]) -> str:
+    errors = validate_final(payload)
+    if errors:
+        raise StrictError("; ".join(errors))
     week, stats = payload.get("week") or {}, payload.get("issue_stats") or {}
     lines = [
         "# Maker 周报：全球 Maker Project Top {}".format(len(payload.get("items", []))), "",
@@ -323,9 +344,13 @@ def render(payload: dict[str, Any]) -> str:
         f"- 共检索平台：{stats.get('platforms_searched', 0)}",
         f"- 尝试平台：{stats.get('platforms_attempted', stats.get('platforms_searched', 0))}；失败或受限：{stats.get('platforms_failed', 0)}",
         f"- 初始候选数量：{stats.get('initial_candidates', 0)}",
+        f"- 原始发现：{stats.get('raw_discoveries', stats.get('initial_candidates', 0))}；通过物理预筛：{stats.get('physical_prefilter_passed', stats.get('initial_candidates', 0))}；通过热度门：{stats.get('heat_gate_passed', stats.get('initial_candidates', 0))}",
         f"- 通过全部标准：{stats.get('selected_projects', 0)}",
         f"- 本周首发：{stats.get('first_release_count', 0)}", "",
     ]
+    if stats.get("coverage_warning"):
+        lines.insert(2, f"> **{stats['coverage_warning']}**")
+        lines.insert(3, "")
     for item in payload.get("items", []):
         decision = item
         creator, gate, excellence = decision["creator"], decision["heat_gate"], decision["excellence"]

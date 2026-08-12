@@ -2,6 +2,7 @@
 
 ## 目录
 
+0. Make Something Gate 与数据阶段
 1. 时间门
 2. Maker Project 定义
 3. 平台范围与热度门槛
@@ -11,6 +12,16 @@
 7. 决策数据结构
 8. 最终输出结构
 9. 证据纪律
+
+## 0. Make Something Gate 与数据阶段
+
+严格区分 `raw_discoveries`、`physical_prefilter_passed`、`editorial_candidates`、`final_selections`。Raw 只供审计，不得显示成候选榜或周报。
+
+在时间、热度和平台 Top 5 之前，每条内容必须同时证明：创作者亲自制作/改造/建造物理实体；实体是核心成果；页面直接显示成品、原型或实质进展；页面直接显示设计、加工、装配、测试或迭代投入。至少记录一条原始页面上的照片、运行视频、制作过程、测试、结构/材料/电子系统或迭代证据。仅凭标题、关键词、标签和 Topic 不得通过。
+
+任一项无法核验时必须记录 `physical_gate.status = "fail"` 和 `rejection_reason = "未找到真实物理造物证据"`。纯软件、性能测试、SDK/API/Yocto 集成、教程/知识库、电子书/工具包、音乐/故事、游戏、概念/渲染/预告、产品营销、套件复刻、修复、食物及仅有周边的内容在此直接排除。
+
+固定流水线为：平台抓取 → raw 审计 → Make Something Gate → 时间门 → 热度门 → 平台 Top 5 → 跨平台去重 → 五关三红线 → 最终 Top 15。
 
 ## 1. 时间门
 

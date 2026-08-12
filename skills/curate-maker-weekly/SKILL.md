@@ -20,26 +20,28 @@ Read [references/editorial-standard.md](references/editorial-standard.md) comple
    ```
 
 2. State the week start, week end, execution date, and timezone before research. Never treat a partial current week as complete.
-3. Enforce original publication time before platform ranking. Reject missing dates and every project first published outside the target week, even if it was updated, gained Stars, or recirculated this week.
-4. Search every requested platform. Use primary project pages, original posts, original videos, campaign pages, or official platform/editorial pages. Prefer the enabled no-account providers described in `references/providers.md`. For Kickstarter, permit Kicktraq only as URL discovery and require official widget metrics. For Indiegogo, prefer its documented no-key Public API. For configured YouTube and Reddit RSS sources, run bounded public-page detail enrichment before the platform Top 5 cap; otherwise use RSS for discovery only when it lacks heat-gate metrics. Treat `blocked`, `error`, and `skipped` as failed coverage, not as searched platforms.
+3. Search all 13 configured platforms and save every bounded fetch result as `raw discoveries`. Raw discoveries are audit data, never Maker candidates. Treat only `ok` and `empty` as completed searches; `blocked`, `error`, and `skipped` are incomplete coverage. If YouTube or Reddit is not completed, show `本期平台覆盖不完整：YouTube/Reddit 未检索` prominently.
+4. Run the Make Something Gate on every raw discovery before time, heat, keywords, or platform Top 5. Require all four facts: the creator made/modified/built a physical object; it is the core result; the page directly shows a built result or substantive prototype; and the page directly shows human design, fabrication, assembly, testing, or iteration. Require at least one original-page photo, video, process, test, structure/material/electronics, or iteration URL. A title, tag, topic, or the words hardware/robot/AI/3D are never evidence. Fail closed with `physical_gate.status = "fail"` and `rejection_reason = "未找到真实物理造物证据"`.
 5. Keep China-mainland platforms, Thingiverse, Printables, MakerWorld, and pure model/material download pages out of the candidate pool.
-6. Collect or import candidates. Cap each platform at `top_per_source` only after its own discovery ranking:
+6. Run the four-stage pipeline. It writes raw audit data, Make Something Gate passes, and physical+time+heat platform Top 5 candidates separately:
 
    ```bash
-   python3 scripts/maker_weekly.py collect --config maker-weekly.json --output output/candidates.json --as-of WEEK_END
+   python3 scripts/maker_weekly.py run --config maker-weekly.json --output-dir output --as-of WEEK_END
    ```
 
-7. Prepare hard-gate and time annotations:
+   The artifacts are `raw-discoveries.json`, `physical-candidates.json`, `researched.json`, and `raw-discoveries-audit.md`. The audit Markdown must be titled `原始发现审计报告（不可发布）`; never call it a weekly report, Top list, or selected project list.
+
+7. Prepare the editorial candidates for strict review:
 
    ```bash
-   python3 scripts/strict_weekly.py prepare --input output/candidates.json --output output/researched.json --week-start YYYY-MM-DD --week-end YYYY-MM-DD
+   python3 scripts/strict_weekly.py prepare --input output/researched.json --output output/researched-strict.json --week-start YYYY-MM-DD --week-end YYYY-MM-DD
    ```
 
 8. Research missing facts and update `researched.json` only with observations backed by primary URLs and capture timestamps. If public heat, creator background, build process, first publication date, physical result, or primary evidence cannot be verified, reject the candidate. Never infer a hidden metric from feed order or general popularity.
 9. Optionally save every researched candidate—not only winners—to an audit snapshot. Never use a snapshot to admit an older project:
 
    ```bash
-   python3 scripts/strict_weekly.py snapshot --input output/researched.json --output snapshots/YYYY-MM-DD.json
+   python3 scripts/strict_weekly.py snapshot --input output/researched-strict.json --output snapshots/YYYY-MM-DD.json
    ```
 
 10. Apply the five gates and three red lines in order. Stop reviewing a candidate at its first failed mandatory gate. Require at least three of four project-gate dimensions and one concrete excellence comparison.
@@ -47,7 +49,7 @@ Read [references/editorial-standard.md](references/editorial-standard.md) comple
 12. Merge, validate, sort, and render:
 
    ```bash
-   python3 scripts/strict_weekly.py select --input output/researched.json --decisions output/decisions.json --output output/final.json
+   python3 scripts/strict_weekly.py select --input output/researched-strict.json --decisions output/decisions.json --output output/final.json
    python3 scripts/strict_weekly.py validate --input output/final.json
    python3 scripts/strict_weekly.py render --input output/final.json --output output/maker-weekly.md
    ```
@@ -60,8 +62,10 @@ Read [references/editorial-standard.md](references/editorial-standard.md) comple
 - Treat platform heat thresholds as hard gates. Unknown, private, conflicting, or post-window metrics do not pass.
 - Permit only `first_release`, backed by an original-page or official-feed timestamp inside the target week. Do not support a breakout category.
 - For GitHub, search by repository `created` time. A current-week push, release, Star increase, or README update does not make an old repository eligible.
-- For YouTube and Reddit, apply project-intent filters and verified heat gates before selecting the platform Top 5; exclude questions, generic discussions, material tests, and unverifiable metrics.
+- For YouTube and Reddit, discover broadly from the default RSS bundles and verify bounded public detail pages. Do not narrow raw discovery with title-only Maker patterns. The Make Something, time, and verified heat gates remove nonprojects before selecting the platform Top 5.
+- Keep Kickstarter enabled in the formal default. Kicktraq may discover official campaign URLs, but only the official Kickstarter widget may supply launch and heat metrics.
+- Preserve the exact stage order: platform fetch → raw audit → Make Something Gate → time gate → heat gate → platform Top 5 → cross-platform deduplication → five gates and three red lines → final Top 15.
 - Merge cross-platform duplicates and retain all primary evidence links.
 - Exclude mature-company official mass-market products, ads, product marketing, pure tutorials, replicas, kit assemblies, routine repairs, concepts, renders, food, and AI-only output.
-- Preserve raw candidates and snapshots for audit. Do not rewrite observed metrics during editorial ranking.
+- Preserve raw discoveries and snapshots for audit. Do not rewrite observed metrics during editorial ranking. Never render raw discoveries through the final report renderer.
 - Never bypass Cloudflare, CAPTCHAs, login walls, rate limits, or platform access controls. A public-page collector must fail closed and preserve the source failure status when the page does not expose candidates or metrics.

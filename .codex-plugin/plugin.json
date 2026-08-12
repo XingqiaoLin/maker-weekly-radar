@@ -1,6 +1,6 @@
 {
   "name": "maker-weekly-radar",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Research and rigorously curate a weekly global Top 15 of verified physical Maker Projects.",
   "author": {
     "name": "Xingqiao Lin",
@@ -14,7 +14,7 @@
   "interface": {
     "displayName": "Maker 周报",
     "shortDescription": "严格核验全球实体 Maker Project 并评选每周 Top 15。",
-    "longDescription": "从全球众筹、Maker、工程、视频、社区与科技媒体平台检索候选，只保留目标自然周首次发布且通过公开热度、五关三红线和六维评分的项目，最多评选 15 个真实落地的实体 Maker Project。",
+    "longDescription": "从全球众筹、Maker、工程、视频、社区与科技媒体平台保存原始发现，先用 Make Something Gate 核验真实物理造物，再执行时间、热度、五关三红线和六维评分，最多评选 15 个真实落地的实体 Maker Project。",
     "developerName": "Xingqiao Lin",
     "category": "Productivity",
     "capabilities": ["Read", "Write", "Network"],

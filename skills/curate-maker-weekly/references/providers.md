@@ -2,7 +2,7 @@
 
 ## Core behavior
 
-Every enabled `sources[]` entry is an independent platform source and contributes at most `top_per_source` discovery candidates. Use one bundled source for multiple channels or subreddits when they share one platform-level Top 5. All lookbacks are calculated in UTC from `--as-of` or the current time.
+Every enabled `sources[]` entry is an independent platform source. Its bounded fetch results first enter `raw-discoveries.json`; they do not count as Maker candidates. Run the Make Something Gate, time gate, and heat gate before applying `top_per_source`. Use one bundled source for multiple channels or subreddits when they share one platform-level Top 5. All lookbacks are calculated in UTC from `--as-of` or the current time.
 
 Credentials are read only from environment variables named in the config. The collector records missing credentials as `skipped` and continues with other sources.
 
@@ -44,7 +44,7 @@ Attempt anonymous discovery from one or more official listing pages, extract onl
 
 Use RSS or Atom without secrets. Set `feed_url` for one feed or `feed_urls` to merge several feeds into one platform-level source before applying the Top 5 limit. `static_metrics` may be used only when the feed URL itself proves the property—for example Hackster's `by=featured` feed may set `featured: true`. This supports discovery from Hackster Featured, curated YouTube channels, subreddit feeds, and editorial publications.
 
-For no-account YouTube, set `detail_enrichment: youtube_public`. The collector normalizes video and Shorts links to the public watch page and records visible video views and channel subscribers. For no-account Reddit, set `detail_enrichment: reddit_old`; the collector reads the public old-Reddit post's score and comment count. Use `required_patterns` and `excluded_patterns` to retain explicit making/building posts while excluding questions, generic discussion, and simple material tests. Set `verified_heat_only: true` so only YouTube items meeting 200,000 views or 50,000 channel subscribers, and Reddit items meeting score plus comments of 5,000, can enter the platform Top 5. `detail_candidate_limit` bounds the discovery shortlist before detail requests, and `detail_workers` controls concurrency. A failed or challenged detail request remains auditable with `metric_verification.status: error` and cannot enter the strict candidate pool.
+For no-account YouTube, set `detail_enrichment: youtube_public`. The collector normalizes video and Shorts links to the public watch page and records visible video views and channel subscribers. For no-account Reddit, set `detail_enrichment: reddit_old`; the collector reads the public old-Reddit post's score and comment count. The formal default deliberately does not use title-only `required_patterns` or `excluded_patterns`: it discovers more posts and lets direct page evidence decide the Make Something Gate. YouTube must reach 200,000 views or 50,000 channel subscribers; Reddit must reach score plus comments of 5,000. `detail_candidate_limit` bounds public detail requests without limiting the later platform Top 5 to title heuristics. A failed or challenged detail request remains in raw audit data with `metric_verification.status: error` or `blocked` and cannot enter the strict candidate pool.
 
 A formal article on Hackaday, Make Magazine, The Verge, or Tom’s Hardware satisfies that platform's reporting heat gate but still must pass every other gate. Public endpoint availability does not override platform terms; never bypass a rejected feed.
 
@@ -55,19 +55,17 @@ Read a local JSON array or an object containing `items`. Use it for web-research
 ## Commands
 
 ```bash
-python3 scripts/maker_weekly.py collect --config maker-weekly.json --output output/candidates.json
-python3 scripts/maker_weekly.py collect --config maker-weekly.json --source instructables --output output/instructables.json
-python3 scripts/maker_weekly.py editorial --input output/candidates.json --decisions output/decisions.json --output output/ranked.json
-python3 scripts/maker_weekly.py baseline --input output/candidates.json --output output/ranked.json
-python3 scripts/maker_weekly.py validate-ranking --input output/ranked.json
-python3 scripts/maker_weekly.py render --input output/ranked.json --output output/maker-weekly.md
+python3 scripts/maker_weekly.py collect --config maker-weekly.json --output output/raw-discoveries.json
+python3 scripts/maker_weekly.py run --config maker-weekly.json --output-dir output --as-of WEEK_END
+python3 scripts/maker_weekly.py baseline --input output/raw-discoveries.json --output output/raw-audit.json
+python3 scripts/maker_weekly.py render --input output/raw-audit.json --output output/raw-discoveries-audit.md
 python3 scripts/strict_weekly.py window
-python3 scripts/strict_weekly.py prepare --input output/candidates.json --output output/researched.json --week-start YYYY-MM-DD --week-end YYYY-MM-DD
-python3 scripts/strict_weekly.py snapshot --input output/researched.json --output snapshots/YYYY-MM-DD.json
+python3 scripts/strict_weekly.py prepare --input output/researched.json --output output/researched-strict.json --week-start YYYY-MM-DD --week-end YYYY-MM-DD
+python3 scripts/strict_weekly.py snapshot --input output/researched-strict.json --output snapshots/YYYY-MM-DD.json
 ```
 
 Use `--as-of 2026-08-12T00:00:00Z` for reproducible runs.
 
 ## Weekly scheduling
 
-The plugin itself does not own a scheduler. Invoke `run` from the user's cron, CI, or automation service. Run from a dedicated working directory, inject secrets through that service, and retain `candidates.json` as an audit artifact. Interactive Codex use should replace the heuristic ranking with the AI comparison described in `SKILL.md`.
+The plugin itself does not own a scheduler. Invoke `run` from the user's cron, CI, or automation service. Run from a dedicated working directory, inject secrets through that service, and retain all four stage artifacts. Only `final.json`, created after strict editorial decisions and validation, may be rendered as a publishable Maker 周报.

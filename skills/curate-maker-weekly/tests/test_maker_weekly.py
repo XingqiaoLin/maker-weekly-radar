@@ -24,19 +24,17 @@ class MakerWeeklyTests(unittest.TestCase):
         second = maker_weekly.canonical_url("https://example.com/project?id=7")
         self.assertEqual(first, second)
 
-    def test_collect_caps_each_source_and_deduplicates(self):
+    def test_physical_gate_failures_do_not_occupy_platform_top_five(self):
         with tempfile.TemporaryDirectory() as raw_dir:
             root = Path(raw_dir)
+            evidence = {"checks": {"creator_made_physical": True, "physical_is_core": True, "built_result_visible": True, "human_process_visible": True}, "evidence": [{"type": "video", "url": "https://example.com/build.mp4"}]}
+            captured = "2026-08-12T00:00:00Z"
             source_a = [
-                {"title": "Open source robotic arm STL", "url": "https://example.com/arm?utm_source=a", "published_at": "2026-08-11T10:00:00Z", "source_score": 100},
-                {"title": "Parametric storage bins", "url": "https://example.com/bins", "published_at": "2026-08-10T10:00:00Z", "source_score": 80},
-                {"title": "Third item should be capped", "url": "https://example.com/third", "published_at": "2026-08-09T10:00:00Z", "source_score": 20},
+                {"title": "Embodied-AI-Guide", "url": "https://example.com/guide", "published_at": "2026-08-11T10:00:00Z", "source_score": 999, "metrics": {"stars": 50000}, "metrics_captured_at": captured},
+                {"title": "Physical robot one", "url": "https://example.com/one", "published_at": "2026-08-11T10:00:00Z", "source_score": 100, "metrics": {"stars": 1200}, "metrics_captured_at": captured, "physical_evidence": evidence},
+                {"title": "Physical robot two", "url": "https://example.com/two", "published_at": "2026-08-10T10:00:00Z", "source_score": 80, "metrics": {"stars": 1100}, "metrics_captured_at": captured, "physical_evidence": evidence},
             ]
-            source_b = [
-                {"title": "Open source robotic arm STL", "url": "https://example.com/arm", "published_at": "2026-08-11T11:00:00Z", "source_score": 90},
-                {"title": "Printable microscope", "url": "https://example.com/microscope", "published_at": "2026-08-11T09:00:00Z", "source_score": 70},
-                {"title": "Another capped item", "url": "https://example.com/fourth", "published_at": "2026-08-09T10:00:00Z", "source_score": 10},
-            ]
+            source_b = []
             (root / "a.json").write_text(json.dumps(source_a), encoding="utf-8")
             (root / "b.json").write_text(json.dumps(source_b), encoding="utf-8")
             config = {
@@ -45,26 +43,21 @@ class MakerWeeklyTests(unittest.TestCase):
                 "final_top": 3,
                 "keywords": ["stl", "printable", "parametric"],
                 "sources": [
-                    {"id": "a", "type": "manual", "platform": "A", "path": "a.json"},
-                    {"id": "b", "type": "manual", "platform": "B", "path": "b.json"},
+                    {"id": "a", "type": "manual", "platform": "GitHub", "path": "a.json"},
+                    {"id": "b", "type": "manual", "platform": "GitHub", "path": "b.json"},
                 ],
             }
             config_path = root / "config.json"
             config_path.write_text(json.dumps(config), encoding="utf-8")
-            payload = maker_weekly.collect_envelope(config_path, datetime(2026, 8, 12, tzinfo=timezone.utc))
+            as_of = datetime(2026, 8, 12, tzinfo=timezone.utc)
+            raw = maker_weekly.collect_raw_envelope(config_path, as_of)
+            annotated, physical = maker_weekly.physical_prefilter_envelopes(raw, workers=1)
+            payload = maker_weekly.editorial_candidates_envelope(physical, as_of)
 
-            self.assertEqual([status["count"] for status in payload["source_status"]], [2, 2])
-            self.assertEqual(len(payload["items"]), 3)
-            arm = next(item for item in payload["items"] if "robotic arm" in item["title"].lower())
-            self.assertEqual(len(arm["also_seen_on"]), 1)
-
-            ranked = maker_weekly.baseline_envelope(payload)
-            self.assertEqual(len(ranked["items"]), 3)
-            self.assertEqual([item["rank"] for item in ranked["items"]], [1, 2, 3])
-            self.assertEqual(maker_weekly.validate_ranking(ranked), [])
-            report = maker_weekly.render_markdown(ranked)
-            self.assertIn("Top 3", report)
-            self.assertIn("来源覆盖", report)
+            rejected = next(item for item in annotated["items"] if item["title"] == "Embodied-AI-Guide")
+            self.assertEqual(rejected["physical_gate"]["status"], "fail")
+            self.assertEqual(len(physical["items"]), 2)
+            self.assertEqual({item["title"] for item in payload["items"]}, {"Physical robot one", "Physical robot two"})
 
     def test_github_rejects_ambiguous_3d_repositories(self):
         response = {
@@ -223,7 +216,7 @@ class MakerWeeklyTests(unittest.TestCase):
         with mock.patch.object(maker_weekly, "request_bytes", side_effect=[feed, maker_weekly.AccessBlocked("challenge")]):
             items = maker_weekly.collect_rss(source, context)
         self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]["metric_verification"]["status"], "error")
+        self.assertEqual(items[0]["metric_verification"]["status"], "blocked")
         self.assertNotIn("views", items[0]["metrics"])
         self.assertEqual(items[0]["_raw_score"], -1)
 
@@ -405,6 +398,106 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertEqual(ranked["items"][0]["rank"], 1)
         self.assertEqual(ranked["items"][0]["evidence"], ["https://example.test/arm"])
         self.assertEqual(ranked["selection_method"], "codex-ai-rubric-v1")
+
+    def test_zero_gate_rejects_named_software_and_knowledge_pollution(self):
+        names = [
+            "Embodied-AI-Guide", "YOLO26 on Dragonwing NPU performance test",
+            "Edge AI Yocto Integration SDK tutorial", "VendPro Toolkit ebook",
+        ]
+        for name in names:
+            with self.subTest(name=name):
+                item = {"title": name, "summary": name, "platform": "GitHub", "url": "https://example.test/item", "author": "Author"}
+                page = {"source_url": item["url"], "text": name, "media_urls": ["https://example.test/screenshot.png"], "structured_steps": 5, "author": "Author"}
+                gate = maker_weekly.derive_physical_gate(item, page)
+                self.assertEqual(gate["status"], "fail")
+                self.assertEqual(gate["rejection_reason"], "未找到真实物理造物证据")
+
+    def test_zero_gate_rejects_music_story_and_content_products(self):
+        for name in ["Placid Drive music album", "THE ISLAND FORTRESS story only", "Business Starter ebook toolkit"]:
+            with self.subTest(name=name):
+                item = {"title": name, "summary": name, "platform": "Kickstarter", "url": "https://example.test/campaign", "author": "Creator"}
+                page = {"source_url": item["url"], "text": name, "media_urls": ["https://example.test/cover.jpg"], "structured_steps": 6, "author": "Creator"}
+                self.assertEqual(maker_weekly.derive_physical_gate(item, page)["status"], "fail")
+
+    def test_zero_gate_rejects_concept_or_marketing_campaign(self):
+        item = {"title": "AI Robot Coming Soon", "summary": "Concept rendering and prelaunch product marketing", "platform": "Kickstarter", "url": "https://example.test/concept", "author": "Brand"}
+        page = {"source_url": item["url"], "text": item["summary"], "media_urls": ["https://example.test/render.jpg"], "structured_steps": 0, "author": "Brand"}
+        self.assertEqual(maker_weekly.derive_physical_gate(item, page)["status"], "fail")
+
+    def test_zero_gate_accepts_documented_physical_robot(self):
+        item = {"title": "Workshop robot", "platform": "Hackster.io", "url": "https://example.test/robot", "author": "Small Team"}
+        page = {
+            "source_url": item["url"],
+            "text": "We designed and built a working robot device. We printed the enclosure, soldered the circuit, assembled the motor and tested two prototype iterations.",
+            "media_urls": ["https://example.test/robot-running.mp4"], "structured_steps": 5, "author": "Small Team",
+        }
+        gate = maker_weekly.derive_physical_gate(item, page)
+        self.assertEqual(gate["status"], "pass")
+        self.assertTrue(all(gate["checks"].values()))
+
+    def test_readme_badges_logos_and_screenshots_are_not_physical_evidence(self):
+        item = {"title": "Robot hardware toolkit", "platform": "GitHub", "url": "https://github.com/example/tool", "author": "Developer"}
+        text = "We built and assembled robot hardware, soldered a circuit, tested a prototype and documented a BOM."
+        for media in ["https://img.shields.io/badge/hardware-open.svg", "https://example.test/logo.png", "https://example.test/screenshot.png"]:
+            with self.subTest(media=media):
+                gate = maker_weekly.derive_physical_gate(item, {"source_url": item["url"], "text": text, "media_urls": [media], "structured_steps": 5, "author": "Developer"})
+                self.assertEqual(gate["status"], "fail")
+
+    def test_social_detail_failures_become_coverage_error_or_blocked(self):
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            config = {"sources": [
+                {"id": "youtube", "type": "rss", "platform": "YouTube", "feed_url": "https://youtube.test/feed"},
+                {"id": "reddit", "type": "rss", "platform": "Reddit", "feed_url": "https://reddit.test/feed"},
+            ]}
+            path = root / "config.json"
+            path.write_text(json.dumps(config), encoding="utf-8")
+
+            def fake(source, _context):
+                if source["id"] == "youtube":
+                    raise maker_weekly.AccessBlocked("login challenge")
+                raise RuntimeError("parser failed")
+
+            with mock.patch.dict(maker_weekly.COLLECTORS, {"rss": fake}):
+                payload = maker_weekly.collect_raw_envelope(path, datetime(2026, 8, 12, tzinfo=timezone.utc))
+            self.assertEqual([status["status"] for status in payload["source_status"]], ["blocked", "error"])
+
+    def test_all_physical_detail_challenges_mark_platform_blocked(self):
+        payload = {
+            "source_status": [{"source_id": "kickstarter", "platform": "Kickstarter", "status": "ok", "raw_count": 1}],
+            "items": [{"source_id": "kickstarter", "platform": "Kickstarter", "url": "https://kickstarter.test/project", "title": "Project"}],
+        }
+        gate = {"status": "fail", "checks": {}, "evidence": [], "rejection_reason": "未找到真实物理造物证据", "verification_status": "blocked"}
+        with mock.patch.object(maker_weekly, "inspect_physical_candidate", return_value=gate):
+            annotated, _ = maker_weekly.physical_prefilter_envelopes(payload, workers=1)
+        self.assertEqual(annotated["source_status"][0]["status"], "blocked")
+
+    def test_raw_discoveries_renderer_is_explicitly_non_publishable(self):
+        payload = {"selection_method": "raw-discovery-audit-only", "as_of": "2026-08-09T23:59:59Z", "config_summary": {"final_top": 15}, "source_status": [], "items": [{"rank": 1, "id": "raw", "title": "Placid Drive", "url": "https://example.test/music", "platform": "Kickstarter", "metrics": {}}]}
+        report = maker_weekly.render_markdown(payload)
+        self.assertIn("原始发现审计报告（不可发布）", report)
+        self.assertNotIn("本周项目", report)
+        self.assertNotIn("入选理由", report)
+        self.assertNotIn("Top 12", report)
+
+    def test_post_cutoff_heat_cannot_backfill_an_issue(self):
+        item = {"platform": "YouTube", "url": "https://youtube.com/watch?v=abcdef1", "metrics": {"views": 999999}, "metrics_captured_at": "2026-08-12T00:00:00Z"}
+        gate = maker_weekly.evaluate_heat_gate(item, datetime(2026, 8, 9, 23, 59, 59, tzinfo=timezone.utc))
+        self.assertEqual(gate["status"], "fail")
+        self.assertIn("晚于周末截止", gate["observed"])
+
+    def test_formal_default_has_all_13_platforms_and_broad_social_rss(self):
+        config_path = Path(__file__).parents[1] / "assets" / "config.example.json"
+        config = maker_weekly.load_config(config_path)
+        self.assertEqual(len(config["sources"]), 13)
+        by_id = {source["id"]: source for source in config["sources"]}
+        self.assertTrue(by_id["kickstarter"]["enabled"])
+        self.assertTrue(by_id["youtube-rss"]["enabled"])
+        self.assertTrue(by_id["reddit-rss"]["enabled"])
+        self.assertNotIn("required_patterns", by_id["youtube-rss"])
+        self.assertNotIn("required_patterns", by_id["reddit-rss"])
+        self.assertGreaterEqual(len(by_id["youtube-rss"]["feed_urls"]), 8)
+        self.assertGreaterEqual(len(by_id["reddit-rss"]["feed_urls"]), 10)
 
 
 if __name__ == "__main__":

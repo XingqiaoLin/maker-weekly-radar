@@ -21,6 +21,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from email.utils import parsedate_to_datetime
@@ -29,7 +30,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-USER_AGENT = "maker-weekly-radar/0.2"
+USER_AGENT = "maker-weekly-radar/0.4"
+REQUIRED_PLATFORMS = {
+    "Kickstarter", "Indiegogo", "GitHub", "Hackaday", "Hackster.io", "Instructables",
+    "YouTube", "Reddit", "X / Twitter", "Instagram", "Make Magazine", "The Verge", "Tom's Hardware",
+}
 SUPPORTED_TYPES = {
     "github", "youtube", "reddit", "instagram", "rss", "manual", "web_html", "instructables_web",
     "kickstarter_kicktraq", "indiegogo_public",
@@ -204,6 +209,7 @@ def candidate(
     evidence: list[str] | None = None,
     raw_score: float = 0.0,
     metrics_captured_at: Any = None,
+    physical_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     title_text, url_text = clean_text(title, 300), str(url or "").strip()
     if not title_text or not url_text.startswith(("http://", "https://")):
@@ -224,6 +230,7 @@ def candidate(
         "evidence": [str(item) for item in (evidence or []) if item],
         "also_seen_on": [],
         "_raw_score": float(raw_score),
+        **({"physical_evidence": physical_evidence} if physical_evidence else {}),
     }
 
 
@@ -421,6 +428,7 @@ class PublicPageParser(HTMLParser):
         self.title_parts: list[str] = []
         self.meta: dict[str, str] = {}
         self.links: list[dict[str, str]] = []
+        self.media_urls: list[str] = []
         self.jsonld: list[str] = []
         self.visible_parts: list[str] = []
         self.time_datetimes: list[str] = []
@@ -447,6 +455,10 @@ class PublicPageParser(HTMLParser):
             self._anchor = {"href": values["href"], "title": values.get("title", ""), "parts": []}
         elif tag == "time" and values.get("datetime"):
             self.time_datetimes.append(values["datetime"])
+        elif tag in {"img", "video", "source"}:
+            media_url = values.get("src") or values.get("data-src") or values.get("poster")
+            if media_url:
+                self.media_urls.append(media_url)
         elif tag == "script":
             self._script_type = values.get("type", "").lower()
             self._script_id = values.get("id", "")
@@ -556,6 +568,188 @@ def public_page_metadata(parser: PublicPageParser, page_url: str) -> dict[str, A
         "author": clean_text(author, 200), "url": str(canonical or page_url),
         "visible_text": clean_text(" ".join(parser.visible_parts), 20000),
     }
+
+
+PHYSICAL_TERMS = (
+    "robot", "camera", "device", "machine", "mechanism", "motor", "sensor", "circuit", "pcb", "electronics",
+    "enclosure", "prototype", "wearable", "furniture", "chair", "table", "lamp", "drone", "vehicle", "rover",
+    "printer", "printed", "print", "cnc", "laser cutter", "wood", "metal", "fabric", "plastic", "gear", "wheel",
+    "tracker", "filter", "sculpture", "installation", "hardware", "mechanical", "assembly", "battery", "solder",
+)
+PROCESS_TERMS = (
+    "built", "build", "made", "making", "designed", "fabricated", "machined", "assembled", "assembly", "printed",
+    "printing", "soldered", "soldering", "wired", "wiring", "cut", "drilled", "prototype", "iterated", "iteration",
+    "tested", "testing", "cad", "bom", "bill of materials", "step 1", "step 2", "how i made", "from scratch", "diy",
+)
+RESULT_TERMS = (
+    "working", "works", "functional", "finished", "final build", "prototype", "demo", "demonstration", "in action",
+    "tested", "testing", "assembled", "built", "made", "completed", "result", "version 2", "iteration",
+)
+EXCLUSION_PATTERNS = (
+    r"\b(music|album|song|film|movie|novel|story|fiction)\b",
+    r"\b(ebook|e-book|whitepaper|toolkit|business starter kit|operator toolkit)\b",
+    r"\b(guide|knowledge base|knowledge navigation|course|curriculum|tutorial collection)\b",
+    r"\b(sdk|api|yocto|operating system|software integration|development environment)\b",
+    r"\b(benchmark|performance test|npu test|model inference)\b",
+    r"\b(simulation only|mujoco|digital twin only|virtual prototype|reinforcement learning environment)\b",
+    r"\b(unboxing|product review|hands-on review|buying guide|news roundup)\b",
+    r"\b(board game|card game|tabletop game)\b",
+    r"\b(concept|rendering|render only|prelaunch|coming soon|story only)\b",
+    r"\b(recipe|cooking|baking|food)\b",
+)
+TRUSTED_CREATOR_PLATFORMS = ("github", "hackster", "instructables", "youtube", "reddit", "kickstarter", "indiegogo", "instagram", "twitter")
+
+
+def page_media_urls(parser: PublicPageParser, raw_text: str, page_url: str) -> list[str]:
+    values = list(parser.media_urls)
+    for key in ("og:image", "twitter:image", "og:video", "twitter:player"):
+        if parser.meta.get(key):
+            values.append(parser.meta[key])
+    values.extend(re.findall(r'https?:\\?/\\?/[^"\s<>]+?\.(?:jpg|jpeg|png|webp|gif|mp4)', raw_text, flags=re.IGNORECASE))
+    normalized = []
+    for value in values:
+        cleaned = html.unescape(str(value)).replace("\\/", "/")
+        absolute = urllib.parse.urljoin(page_url, cleaned)
+        if absolute.startswith(("http://", "https://")):
+            normalized.append(absolute)
+    return list(dict.fromkeys(normalized))[:20]
+
+
+def matching_terms(text: str, terms: tuple[str, ...]) -> list[str]:
+    lowered = text.lower()
+    return [term for term in terms if term in lowered]
+
+
+def substantive_media_url(value: str) -> bool:
+    lowered = urllib.parse.unquote(value).lower()
+    non_evidence = ("shields.io", "badge", "logo", "banner", "screenshot", "avatar", "favicon", "social-preview")
+    return value.startswith(("http://", "https://")) and not any(marker in lowered for marker in non_evidence)
+
+
+def explicit_physical_gate(item: dict[str, Any]) -> dict[str, Any] | None:
+    supplied = item.get("physical_evidence")
+    if not isinstance(supplied, dict):
+        return None
+    checks = supplied.get("checks") if isinstance(supplied.get("checks"), dict) else {}
+    required = ("creator_made_physical", "physical_is_core", "built_result_visible", "human_process_visible")
+    normalized = {key: checks.get(key) is True for key in required}
+    evidence = supplied.get("evidence") if isinstance(supplied.get("evidence"), list) else []
+    passed = all(normalized.values()) and any(isinstance(entry, dict) and str(entry.get("url") or "").startswith(("http://", "https://")) for entry in evidence)
+    return {
+        "status": "pass" if passed else "fail",
+        "checks": normalized,
+        "evidence": evidence,
+        **({} if passed else {"rejection_reason": "未找到真实物理造物证据"}),
+    }
+
+
+def derive_physical_gate(item: dict[str, Any], page: dict[str, Any]) -> dict[str, Any]:
+    explicit = explicit_physical_gate(item)
+    if explicit is not None:
+        return explicit
+    text = clean_text(" ".join([
+        str(item.get("title") or ""), str(item.get("summary") or ""), str(page.get("text") or ""),
+    ]), 50000)
+    media_urls = [str(value) for value in page.get("media_urls") or [] if substantive_media_url(str(value))]
+    physical_hits = matching_terms(text, PHYSICAL_TERMS)
+    process_hits = matching_terms(text, PROCESS_TERMS)
+    result_hits = matching_terms(text, RESULT_TERMS)
+    excluded = [pattern for pattern in EXCLUSION_PATTERNS if re.search(pattern, text, flags=re.IGNORECASE)]
+    strong_physical = len(set(physical_hits)) >= 2
+    structured_steps = int(page.get("structured_steps") or 0)
+    first_person_make = bool(re.search(r"\b(i|we|my team)\s+(built|made|designed|fabricated|assembled|printed|created)\b", text, flags=re.IGNORECASE))
+    platform = str(item.get("platform") or "").lower()
+    trusted_creator_page = any(value in platform for value in TRUSTED_CREATOR_PLATFORMS)
+    author_known = bool(str(item.get("author") or page.get("author") or "").strip())
+    video_project_claim = "youtube" in platform and bool(media_urls) and strong_physical and bool(process_hits) and not excluded
+    creator_made = first_person_make or (trusted_creator_page and author_known and (structured_steps >= 2 or len(set(process_hits)) >= 2)) or video_project_claim
+    physical_core = strong_physical and not excluded
+    built_result = bool(media_urls) and bool(result_hits) and physical_core
+    human_process = (structured_steps >= 2 or len(set(process_hits)) >= 2) and creator_made
+    checks = {
+        "creator_made_physical": bool(creator_made),
+        "physical_is_core": bool(physical_core),
+        "built_result_visible": bool(built_result),
+        "human_process_visible": bool(human_process),
+    }
+    source_url = str(page.get("source_url") or item.get("url") or "")
+    evidence: list[dict[str, str]] = []
+    if media_urls:
+        evidence.append({"type": "photo_or_video", "url": media_urls[0], "description": "原始页面公开的成品、原型或运行媒体"})
+    if source_url.startswith(("http://", "https://")) and (process_hits or structured_steps):
+        description = f"原始页面包含制作/装配/测试信息：{', '.join(list(dict.fromkeys(process_hits))[:6]) or f'{structured_steps} structured steps'}"
+        evidence.append({"type": "process", "url": source_url, "description": description})
+    passed = all(checks.values()) and bool(evidence)
+    result = {"status": "pass" if passed else "fail", "checks": checks, "evidence": evidence}
+    if not passed:
+        result["rejection_reason"] = "未找到真实物理造物证据"
+        if excluded:
+            result["exclusion_matches"] = excluded
+    return result
+
+
+def github_readme_page(item: dict[str, Any], timeout: int) -> dict[str, Any]:
+    parsed = urllib.parse.urlsplit(str(item.get("url") or ""))
+    parts = [part for part in parsed.path.split("/") if part]
+    if (parsed.hostname or "").lower() != "github.com" or len(parts) < 2:
+        raise RuntimeError("invalid GitHub repository URL")
+    api_url = f"https://api.github.com/repos/{urllib.parse.quote(parts[0])}/{urllib.parse.quote(parts[1])}/readme"
+    metadata = request_json(api_url, timeout, headers={"Accept": "application/vnd.github+json"})
+    download_url = str(metadata.get("download_url") or "")
+    if not download_url:
+        raise RuntimeError("GitHub repository has no public README")
+    readme = request_bytes(download_url, timeout, headers={"Accept": "text/plain"}).decode("utf-8", errors="replace")
+    media = []
+    for target in re.findall(r"!\[[^\]]*\]\(([^)]+)\)|<img[^>]+src=[\"']([^\"']+)", readme, flags=re.IGNORECASE):
+        value = target[0] or target[1]
+        if value:
+            media.append(urllib.parse.urljoin(download_url, value))
+    structured_steps = len(re.findall(r"^#{1,6}\s+.*\b(build|assembly|hardware|mechanical|fabrication|testing|bom|bill of materials)\b", readme, flags=re.IGNORECASE | re.MULTILINE))
+    return {"source_url": str(item.get("url")), "text": readme, "media_urls": media, "structured_steps": structured_steps, "author": item.get("author")}
+
+
+def inspect_physical_candidate(item: dict[str, Any], timeout: int) -> dict[str, Any]:
+    explicit = explicit_physical_gate(item)
+    if explicit is not None:
+        return explicit
+    cached_page = item.get("physical_page")
+    try:
+        if isinstance(cached_page, dict):
+            page = cached_page
+        elif "github" in str(item.get("platform") or "").lower():
+            page = github_readme_page(item, timeout)
+        else:
+            page_url = str(item.get("url") or "")
+            parser, raw_text = parse_public_page(request_bytes(page_url, timeout, headers={"Accept": "text/html,application/xhtml+xml"}))
+            metadata = public_page_metadata(parser, page_url)
+            structured_steps = sum(1 for node in jsonld_nodes(parser.jsonld) if str(node.get("@type") or "").lower() in {"howtostep", "step"})
+            structured_steps += len(re.findall(r"\bstep\s+[0-9]+\b", metadata["visible_text"], flags=re.IGNORECASE))
+            page = {
+                "source_url": page_url,
+                "text": f"{metadata['title']} {metadata['summary']} {metadata['visible_text']}",
+                "media_urls": page_media_urls(parser, raw_text, page_url),
+                "structured_steps": structured_steps,
+                "author": metadata.get("author"),
+            }
+        return derive_physical_gate(item, page)
+    except AccessBlocked as exc:
+        return {
+            "status": "fail",
+            "checks": {"creator_made_physical": False, "physical_is_core": False, "built_result_visible": False, "human_process_visible": False},
+            "evidence": [],
+            "rejection_reason": "未找到真实物理造物证据",
+            "verification_status": "blocked",
+            "detail": clean_text(str(exc), 300),
+        }
+    except (RuntimeError, OSError) as exc:
+        return {
+            "status": "fail",
+            "checks": {"creator_made_physical": False, "physical_is_core": False, "built_result_visible": False, "human_process_visible": False},
+            "evidence": [],
+            "rejection_reason": "未找到真实物理造物证据",
+            "verification_status": "error",
+            "detail": clean_text(str(exc), 300),
+        }
 
 
 def compact_number(value: str) -> float | None:
@@ -935,7 +1129,7 @@ def youtube_watch_url(value: str) -> str:
 def enrich_youtube_public(item: dict[str, Any], timeout: int) -> None:
     detail_url = youtube_watch_url(str(item.get("url") or ""))
     raw = request_bytes(detail_url, timeout, headers={"Accept": "text/html,application/xhtml+xml"})
-    _, page = parse_public_page(raw)
+    parser, page = parse_public_page(raw)
     video_details = re.search(r'"videoDetails":\{.*?"viewCount":"([0-9]+)"', page, flags=re.DOTALL)
     if video_details is None:
         video_details = re.search(r'"viewCount":"([0-9]+)"', page)
@@ -958,6 +1152,14 @@ def enrich_youtube_public(item: dict[str, Any], timeout: int) -> None:
         "ranking_basis": "views/200000 + channel_subscribers/50000",
     }
     item["evidence"] = list(dict.fromkeys((item.get("evidence") or []) + [detail_url]))
+    metadata = public_page_metadata(parser, detail_url)
+    item["physical_page"] = {
+        "source_url": detail_url,
+        "text": f"{metadata['title']} {metadata['summary']} {metadata['visible_text']}",
+        "media_urls": page_media_urls(parser, page, detail_url),
+        "structured_steps": len(re.findall(r"\b(build|built|making|fabricat|assembl|solder|test|iterat)\w*\b", page, flags=re.IGNORECASE)),
+        "author": item.get("author") or metadata.get("author"),
+    }
     # Normalize both public signals by the editorial heat thresholds. This keeps
     # a subscriber-qualified video comparable with a view-qualified video while
     # preserving views as a useful tie-breaker between videos on one channel.
@@ -977,7 +1179,7 @@ def reddit_old_url(value: str) -> str:
 def enrich_reddit_public(item: dict[str, Any], timeout: int) -> None:
     detail_url = reddit_old_url(str(item.get("url") or ""))
     raw = request_bytes(detail_url, timeout, headers={"Accept": "text/html,application/xhtml+xml"})
-    _, page = parse_public_page(raw)
+    parser, page = parse_public_page(raw)
     post_id_match = re.search(r"/comments/([A-Za-z0-9]+)/", detail_url)
     post_id = post_id_match.group(1) if post_id_match else ""
     opening_tag = re.search(rf'<div\b[^>]*\bid="thing_t3_{re.escape(post_id)}"[^>]*>', page, flags=re.IGNORECASE)
@@ -1009,6 +1211,14 @@ def enrich_reddit_public(item: dict[str, Any], timeout: int) -> None:
         "ranking_basis": "score + comments",
     }
     item["evidence"] = list(dict.fromkeys((item.get("evidence") or []) + [detail_url]))
+    metadata = public_page_metadata(parser, detail_url)
+    item["physical_page"] = {
+        "source_url": detail_url,
+        "text": f"{metadata['title']} {metadata['summary']} {metadata['visible_text']}",
+        "media_urls": page_media_urls(parser, page, detail_url),
+        "structured_steps": len(re.findall(r"\b(build|built|making|fabricat|assembl|solder|test|iterat)\w*\b", page, flags=re.IGNORECASE)),
+        "author": item.get("author") or metadata.get("author"),
+    }
     item["_raw_score"] = float(score + comments)
 
 
@@ -1026,6 +1236,11 @@ def enrich_rss_details(source: dict[str, Any], results: list[dict[str, Any]], ti
     def enrich_one(item: dict[str, Any]) -> None:
         try:
             enricher(item, timeout)
+        except AccessBlocked as exc:
+            item["_raw_score"] = -1.0
+            item["metric_verification"] = {
+                "status": "blocked", "captured_at": iso_z(now_utc()), "detail": clean_text(str(exc), 300),
+            }
         except Exception as exc:
             # Keep the discovery candidate for audit, but place unverifiable
             # metrics behind every successfully verified heat score.
@@ -1109,8 +1324,8 @@ def collect_rss(source: dict[str, Any], context: dict[str, Any]) -> list[dict[st
             reverse=True,
         )[:detail_limit]
     enrich_rss_details(source, results, context["timeout"])
-    if source.get("verified_heat_only"):
-        results = [item for item in results if verified_platform_heat_passes(item)]
+    # Raw discovery deliberately keeps metric failures and sub-threshold posts.
+    # The platform heat gate runs only after the physical and time gates.
     return results
 
 
@@ -1139,7 +1354,7 @@ def collect_manual(source: dict[str, Any], context: dict[str, Any]) -> list[dict
         item = candidate(
             source, raw.get("title"), raw.get("url"), summary=raw.get("summary"), author=raw.get("author"),
             published_at=published, metrics=metrics, tags=raw.get("tags") or [], evidence=raw.get("evidence") or [raw.get("url")], raw_score=raw_score,
-            metrics_captured_at=raw.get("metrics_captured_at"),
+            metrics_captured_at=raw.get("metrics_captured_at"), physical_evidence=raw.get("physical_evidence"),
         )
         if item:
             results.append(item)
@@ -1178,6 +1393,11 @@ def validate_config(config: dict[str, Any]) -> None:
         seen.add(source["id"])
         if source.get("type") not in SUPPORTED_TYPES:
             raise ConfigError(f"unsupported source type for {source['id']}: {source.get('type')}")
+    if config.get("require_all_platforms", False):
+        configured = {str(source.get("platform") or "").lower().strip() for source in config["sources"]}
+        missing = sorted(platform for platform in REQUIRED_PLATFORMS if platform.lower() not in configured)
+        if missing:
+            raise ConfigError("formal config is missing required platforms: " + ", ".join(missing))
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -1241,7 +1461,7 @@ def heuristic_components(item: dict[str, Any], as_of: datetime, keywords: list[s
     }
 
 
-def collect_envelope(config_path: Path, as_of: datetime, source_ids: set[str] | None = None) -> dict[str, Any]:
+def collect_raw_envelope(config_path: Path, as_of: datetime, source_ids: set[str] | None = None) -> dict[str, Any]:
     config = load_config(config_path)
     lookback_days = int(config.get("lookback_days", 7))
     limit = int(config.get("top_per_source", 5))
@@ -1249,7 +1469,7 @@ def collect_envelope(config_path: Path, as_of: datetime, source_ids: set[str] | 
     window_start = (as_of - timedelta(days=max(0, lookback_days - 1))).replace(hour=0, minute=0, second=0, microsecond=0)
     context = {
         "as_of": as_of, "since": window_start, "lookback_days": lookback_days,
-        "limit": limit, "timeout": int(config.get("request_timeout_seconds", 20)), "keywords": [word.lower() for word in keywords],
+        "limit": int(config.get("discovery_per_source", 50)), "timeout": int(config.get("request_timeout_seconds", 20)), "keywords": [word.lower() for word in keywords],
         "config_dir": config_path.resolve().parent,
     }
     collected, statuses = [], []
@@ -1257,33 +1477,34 @@ def collect_envelope(config_path: Path, as_of: datetime, source_ids: set[str] | 
         if source_ids and str(source["id"]) not in source_ids:
             continue
         if not source.get("enabled", True):
-            statuses.append({"source_id": source["id"], "platform": source.get("platform", source["id"]), "status": "disabled", "count": 0})
+            statuses.append({"source_id": source["id"], "platform": source.get("platform", source["id"]), "status": "skipped", "raw_count": 0, "count": 0, "detail": "source disabled in configuration"})
             continue
         try:
             raw_items = COLLECTORS[source["type"]](source, context)
-            if config.get("strict_current_week_only", True):
-                raw_items = [item for item in raw_items if publication_is_in_window(item, context["since"], context["as_of"])]
-            items = cap_and_rank(raw_items, limit)
-            collected.extend(items)
-            statuses.append({"source_id": source["id"], "platform": source.get("platform", source["id"]), "status": "ok", "count": len(items)})
+            collected.extend(raw_items)
+            verification = [str(item.get("metric_verification", {}).get("status") or "") for item in raw_items]
+            detail_failures = bool(verification) and all(value in {"error", "blocked"} for value in verification)
+            if detail_failures:
+                blocked = any(value == "blocked" for value in verification)
+                status = "blocked" if blocked else "error"
+                detail = "discovery succeeded but every public metric detail request failed"
+            else:
+                status = "ok" if raw_items else "empty"
+                detail = ""
+            statuses.append({"source_id": source["id"], "platform": source.get("platform", source["id"]), "status": status, "raw_count": len(raw_items), "count": len(raw_items), **({"detail": detail} if detail else {})})
         except MissingCredential as exc:
-            statuses.append({"source_id": source["id"], "platform": source.get("platform", source["id"]), "status": "skipped", "count": 0, "detail": str(exc)})
+            statuses.append({"source_id": source["id"], "platform": source.get("platform", source["id"]), "status": "skipped", "raw_count": 0, "count": 0, "detail": str(exc)})
         except AccessBlocked as exc:
-            statuses.append({"source_id": source["id"], "platform": source.get("platform", source["id"]), "status": "blocked", "count": 0, "detail": str(exc)})
+            statuses.append({"source_id": source["id"], "platform": source.get("platform", source["id"]), "status": "blocked", "raw_count": 0, "count": 0, "detail": str(exc)})
         except Exception as exc:  # isolate provider failures so partial reports remain useful
-            statuses.append({"source_id": source["id"], "platform": source.get("platform", source["id"]), "status": "error", "count": 0, "detail": str(exc)})
-    unique = deduplicate(collected)
-    for item in unique:
-        components = heuristic_components(item, as_of, keywords)
-        item["heuristic_score"] = round(sum(components.values()), 2)
-        item["heuristic_breakdown"] = components
-    unique.sort(key=lambda item: (item["heuristic_score"], item.get("published_at") or ""), reverse=True)
+            statuses.append({"source_id": source["id"], "platform": source.get("platform", source["id"]), "status": "error", "raw_count": 0, "count": 0, "detail": str(exc)})
     return {
-        "schema_version": 1,
+        "schema_version": 2,
+        "stage": "raw_discoveries",
         "generated_at": iso_z(now_utc()),
         "as_of": iso_z(as_of),
         "window_start": iso_z(context["since"]),
-        "selection_method": "unranked-candidates",
+        "selection_method": "raw-discovery-audit-only",
         "config_summary": {
             "lookback_days": lookback_days,
             "strict_current_week_only": bool(config.get("strict_current_week_only", True)),
@@ -1292,21 +1513,147 @@ def collect_envelope(config_path: Path, as_of: datetime, source_ids: set[str] | 
             "keywords": keywords,
         },
         "source_status": statuses,
-        "items": unique,
+        "stage_counts": {"raw_discoveries": len(collected)},
+        "items": collected,
     }
 
 
+def physical_prefilter_envelopes(payload: dict[str, Any], timeout: int = 20, workers: int = 6) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Annotate every raw discovery, then return only Make Something Gate passes."""
+    annotated = deepcopy(payload)
+    items = annotated.get("items") if isinstance(annotated.get("items"), list) else []
+    worker_count = max(1, min(8, workers, len(items))) if items else 1
+    if worker_count == 1:
+        gates = [inspect_physical_candidate(item, timeout) for item in items]
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="physical-gate") as executor:
+            gates = list(executor.map(lambda item: inspect_physical_candidate(item, timeout), items))
+    for item, gate in zip(items, gates):
+        item["physical_gate"] = gate
+        if gate.get("status") != "pass":
+            item["rejection_reason"] = gate.get("rejection_reason") or "未找到真实物理造物证据"
+    passed = [deepcopy(item) for item in items if item.get("physical_gate", {}).get("status") == "pass"]
+    annotated["stage"] = "raw_discoveries"
+    annotated["selection_method"] = "raw-discovery-audit-only"
+    for status in annotated.get("source_status") or []:
+        source_items = [item for item in items if item.get("source_id") == status.get("source_id")]
+        status["physical_count"] = sum(item.get("physical_gate", {}).get("status") == "pass" for item in source_items)
+        verification = [item.get("physical_gate", {}).get("verification_status") for item in source_items]
+        if verification and all(value in {"blocked", "error"} for value in verification):
+            status["status"] = "blocked" if any(value == "blocked" for value in verification) else "error"
+            status["detail"] = "raw discovery succeeded, but every physical-evidence detail page was inaccessible"
+    physical = deepcopy(annotated)
+    physical["stage"] = "physical_prefilter_passed"
+    physical["selection_method"] = "make-something-gate-v1"
+    physical["items"] = passed
+    physical["stage_counts"] = {**(annotated.get("stage_counts") or {}), "physical_prefilter_passed": len(passed)}
+    annotated["stage_counts"] = {**(annotated.get("stage_counts") or {}), "physical_prefilter_passed": len(passed)}
+    return annotated, physical
+
+
+def metric_number(metrics: dict[str, Any], *names: str) -> float | None:
+    for name in names:
+        value = metrics.get(name)
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value.replace(",", "").replace("$", ""))
+            except ValueError:
+                continue
+    return None
+
+
+def evaluate_heat_gate(item: dict[str, Any], as_of: datetime) -> dict[str, Any]:
+    platform = str(item.get("platform") or "").lower().strip()
+    metrics = item.get("metrics") if isinstance(item.get("metrics"), dict) else {}
+    captured = parse_datetime(item.get("metrics_captured_at"))
+    gate: dict[str, Any] = {"status": "unknown", "threshold": "平台未映射", "observed": "无法核验", "captured_at": item.get("metrics_captured_at"), "evidence_url": item.get("url")}
+    dynamic = any(value in platform for value in (
+        "kickstarter", "indiegogo", "github", "youtube", "reddit", "twitter", "instagram", "hackster", "instructables",
+    ))
+    if dynamic and (captured is None or captured > as_of):
+        gate.update(status="fail", observed="指标缺少截止日前快照" if captured is None else f"指标抓取时间 {iso_z(captured)} 晚于周末截止")
+        return gate
+    if "kickstarter" in platform or "indiegogo" in platform:
+        pledged, backers = metric_number(metrics, "usd_pledged", "pledged_usd"), metric_number(metrics, "backers")
+        gate.update(threshold="US$20,000 或 200 名支持者", observed=f"USD={pledged}; backers={backers}")
+        gate["status"] = "pass" if (pledged or 0) >= 20000 or (backers or 0) >= 200 else "fail"
+    elif "github" in platform:
+        stars = metric_number(metrics, "stars")
+        gate.update(threshold="1,000 Stars", observed=f"stars={stars}", status="pass" if stars is not None and stars >= 1000 else "fail")
+    elif "youtube" in platform:
+        views, subscribers = metric_number(metrics, "views"), metric_number(metrics, "channel_subscribers", "subscribers")
+        gate.update(threshold="200,000 播放或频道 50,000 订阅", observed=f"views={views}; subscribers={subscribers}", status="pass" if (views or 0) >= 200000 or (subscribers or 0) >= 50000 else "fail")
+    elif "reddit" in platform:
+        score, comments = metric_number(metrics, "score", "upvotes"), metric_number(metrics, "comments")
+        gate.update(threshold="score + comments >= 5,000", observed=f"score={score}; comments={comments}", status="pass" if score is not None and comments is not None and score + comments >= 5000 else "fail")
+    elif platform in {"x", "x / twitter", "twitter", "instagram"}:
+        values = [metric_number(metrics, name) for name in ("likes", "comments", "reposts", "replies", "quotes")]
+        interactions = metric_number(metrics, "interactions")
+        if interactions is None and any(value is not None for value in values):
+            interactions = sum(value or 0 for value in values)
+        gate.update(threshold="公开互动 >= 5,000", observed=f"interactions={interactions}", status="pass" if interactions is not None and interactions >= 5000 else "fail")
+    elif "hackster" in platform or "instructables" in platform:
+        featured = metrics.get("featured")
+        gate.update(threshold="精选/Featured", observed=f"featured={featured}", status="pass" if featured is True else "fail")
+    elif platform in {"hackaday", "make magazine", "the verge", "tom's hardware", "tom’s hardware"}:
+        gate.update(threshold="平台正式报道", observed="原始正式文章", status="pass")
+    return gate
+
+
+def editorial_candidates_envelope(payload: dict[str, Any], as_of: datetime) -> dict[str, Any]:
+    """Apply time and heat gates, then calculate each platform's Top 5."""
+    result = deepcopy(payload)
+    start = parse_datetime(result.get("window_start")) or as_of
+    limit = int((result.get("config_summary") or {}).get("top_per_source", 5))
+    passed: list[dict[str, Any]] = []
+    for item in result.get("items") or []:
+        item["time_gate"] = {"status": "pass" if publication_is_in_window(item, start, as_of) else "fail"}
+        item["heat_gate"] = evaluate_heat_gate(item, as_of)
+        if item.get("physical_gate", {}).get("status") == "pass" and item["time_gate"]["status"] == "pass" and item["heat_gate"]["status"] == "pass":
+            passed.append(item)
+    top_items: list[dict[str, Any]] = []
+    for platform in dict.fromkeys(str(item.get("platform")) for item in passed):
+        top_items.extend(cap_and_rank([item for item in passed if str(item.get("platform")) == platform], limit))
+    result["items"] = deduplicate(top_items)
+    result["stage"] = "editorial_candidates"
+    result["selection_method"] = "physical-time-heat-platform-top5"
+    time_passed = sum(publication_is_in_window(item, start, as_of) for item in payload.get("items") or [])
+    heat_passed = sum(
+        publication_is_in_window(item, start, as_of) and evaluate_heat_gate(item, as_of).get("status") == "pass"
+        for item in payload.get("items") or []
+    )
+    result["stage_counts"] = {
+        **(payload.get("stage_counts") or {}), "time_gate_passed": time_passed,
+        "heat_gate_passed": heat_passed, "editorial_candidates": len(result["items"]),
+    }
+    for status in result.get("source_status") or []:
+        source_items = [item for item in payload.get("items") or [] if item.get("source_id") == status.get("source_id")]
+        status["time_count"] = sum(publication_is_in_window(item, start, as_of) for item in source_items)
+        status["heat_count"] = sum(publication_is_in_window(item, start, as_of) and evaluate_heat_gate(item, as_of).get("status") == "pass" for item in source_items)
+        status["candidate_count"] = sum(item.get("source_id") == status.get("source_id") for item in result["items"])
+        status["count"] = status["candidate_count"]
+    return result
+
+
+def collect_envelope(config_path: Path, as_of: datetime, source_ids: set[str] | None = None) -> dict[str, Any]:
+    """Compatibility entry point returning stage-three editorial candidates."""
+    raw = collect_raw_envelope(config_path, as_of, source_ids)
+    _, physical = physical_prefilter_envelopes(raw, timeout=int(load_config(config_path).get("request_timeout_seconds", 20)))
+    return editorial_candidates_envelope(physical, as_of)
+
+
 def baseline_envelope(payload: dict[str, Any]) -> dict[str, Any]:
-    limit = int((payload.get("config_summary") or {}).get("final_top", 15))
-    items = sorted(payload.get("items", []), key=lambda item: item.get("heuristic_score", 0), reverse=True)[:limit]
+    items = deepcopy(payload.get("items", []))
     for index, item in enumerate(items, 1):
         item["rank"] = index
-        item["ai_score"] = item.get("heuristic_score", 0)
-        item["score_breakdown"] = item.get("heuristic_breakdown", {})
-        item["why_selected"] = "Deterministic baseline based on relevance, same-source engagement, freshness, evidence, and maker value."
-        item["risks_or_unknowns"] = ["Not yet reviewed by the AI editorial comparison."]
+        item["ai_score"] = 0
+        item["score_breakdown"] = {}
+        item["why_selected"] = "仅供抓取审计；不是 Maker 候选或入选结论。"
+        item["risks_or_unknowns"] = ["尚未通过完整硬门槛。"]
     result = dict(payload)
-    result["selection_method"] = "heuristic-v1"
+    result["selection_method"] = "raw-discovery-audit-only"
     result["items"] = items
     return result
 
@@ -1384,31 +1731,32 @@ def render_markdown(payload: dict[str, Any]) -> str:
     items = sorted(payload.get("items", []), key=lambda item: item.get("rank", 9999))
     as_of = payload.get("as_of", "unknown")
     lines = [
-        f"# 3D 打印 Maker 周报 · Top {len(items)}",
+        "# 原始发现审计报告（不可发布）",
         "",
         f"统计截止：{as_of}  ",
         f"评选方式：`{payload.get('selection_method', 'unknown')}`",
+        "此文件仅记录抓取结果；其中内容不得视为 Maker 候选、入选项目或周报结论。",
         "",
         "## 来源覆盖",
         "",
-        "| 来源 | 状态 | 候选数 | 说明 |",
+        "| 来源 | 状态 | 原始发现数 | 说明 |",
         "|---|---:|---:|---|",
     ]
     for status in payload.get("source_status", []):
         detail = str(status.get("detail", "")).replace("|", "\\|")
         lines.append(f"| {status.get('platform', status.get('source_id'))} | {status.get('status')} | {status.get('count', 0)} | {detail} |")
-    lines.extend(["", "## 本周项目", ""])
+    searched = sum(status.get("status") in {"ok", "empty"} for status in payload.get("source_status", []))
+    lines.extend(["", f"实际完成检索平台：{searched}", "", "## 原始发现明细", ""])
     for index, item in enumerate(items, 1):
         rank = item.get("rank", index)
-        score = item.get("ai_score", item.get("heuristic_score", 0))
         lines.extend([
             f"### {rank}. [{item.get('title', 'Untitled')}]({item.get('url', '')})",
             "",
             f"- 平台：{item.get('platform', '')}",
-            f"- 评分：{score}/100",
             f"- 发布：{item.get('published_at') or '未知'}",
             f"- 指标：{metric_text(item.get('metrics') or {})}",
-            f"- 入选理由：{item.get('why_selected') or item.get('summary') or '待编辑'}",
+            f"- 审计说明：{item.get('why_selected') or item.get('summary') or '未评审'}",
+            f"- 物理造物门：{item.get('physical_gate', {}).get('status', '未执行')}",
         ])
         risks = item.get("risks_or_unknowns") or []
         if risks:
@@ -1417,9 +1765,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
             links = ", ".join(f"[{seen.get('platform')}]({seen.get('url')})" for seen in item["also_seen_on"])
             lines.append(f"- 其他来源：{links}")
         lines.append("")
-    if len(items) < int((payload.get("config_summary") or {}).get("final_top", 15)):
-        lines.extend(["> 本期可信候选不足 15 条，因此没有用低质量条目补位。", ""])
-    lines.extend(["## 方法说明", "", "各来源先独立取 Top 5，再进行跨平台去重与统一评选。平台热度只在同一来源内比较；评分同时考虑可复现性、创新、证据、时效和社区价值。", ""])
+    lines.extend(["## 方法说明", "", "原始发现先保存审计，再依次通过物理造物门、时间门和热度门；只有三门均通过后才计算各平台 Top 5。", ""])
     return "\n".join(lines)
 
 
@@ -1435,7 +1781,7 @@ def parse_as_of(value: str | None) -> datetime:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    collect = sub.add_parser("collect", help="collect and normalize source candidates")
+    collect = sub.add_parser("collect", help="collect raw discoveries for audit")
     collect.add_argument("--config", required=True, type=Path)
     collect.add_argument("--output", required=True, type=Path)
     collect.add_argument("--as-of")
@@ -1452,7 +1798,7 @@ def build_parser() -> argparse.ArgumentParser:
     render = sub.add_parser("render", help="render ranked JSON as Markdown")
     render.add_argument("--input", required=True, type=Path)
     render.add_argument("--output", required=True, type=Path)
-    run = sub.add_parser("run", help="collect, heuristic-rank, and render")
+    run = sub.add_parser("run", help="write raw, physical, editorial-candidate, and audit artifacts")
     run.add_argument("--config", required=True, type=Path)
     run.add_argument("--output-dir", required=True, type=Path)
     run.add_argument("--as-of")
@@ -1464,9 +1810,9 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         if args.command == "collect":
-            payload = collect_envelope(args.config, parse_as_of(args.as_of), set(args.source or []))
+            payload = collect_raw_envelope(args.config, parse_as_of(args.as_of), set(args.source or []))
             write_json(args.output, payload)
-            print(f"collected {len(payload['items'])} unique candidates -> {args.output}")
+            print(f"collected {len(payload['items'])} raw discoveries -> {args.output}")
         elif args.command == "baseline":
             payload = baseline_envelope(read_json(args.input))
             write_json(args.output, payload)
@@ -1490,15 +1836,16 @@ def main(argv: list[str] | None = None) -> int:
             write_text(args.output, render_markdown(payload))
             print(f"rendered report -> {args.output}")
         elif args.command == "run":
-            collected = collect_envelope(args.config, parse_as_of(args.as_of), set(args.source or []))
-            ranked = baseline_envelope(collected)
-            candidates_path = args.output_dir / "candidates.json"
-            ranked_path = args.output_dir / "ranked.json"
-            report_path = args.output_dir / "maker-weekly.md"
-            write_json(candidates_path, collected)
-            write_json(ranked_path, ranked)
-            write_text(report_path, render_markdown(ranked))
-            print(f"wrote candidates, baseline ranking, and report to {args.output_dir}")
+            as_of = parse_as_of(args.as_of)
+            raw = collect_raw_envelope(args.config, as_of, set(args.source or []))
+            annotated_raw, physical = physical_prefilter_envelopes(raw, timeout=int(load_config(args.config).get("request_timeout_seconds", 20)))
+            researched = editorial_candidates_envelope(physical, as_of)
+            audit = baseline_envelope(annotated_raw)
+            write_json(args.output_dir / "raw-discoveries.json", annotated_raw)
+            write_json(args.output_dir / "physical-candidates.json", physical)
+            write_json(args.output_dir / "researched.json", researched)
+            write_text(args.output_dir / "raw-discoveries-audit.md", render_markdown(audit))
+            print(f"wrote raw discoveries, physical candidates, editorial candidates, and non-publishable audit to {args.output_dir}")
         return 0
     except (ConfigError, json.JSONDecodeError, OSError, RuntimeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
