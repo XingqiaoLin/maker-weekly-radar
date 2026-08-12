@@ -219,6 +219,28 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertEqual(item["metric_verification"]["status"], "ok")
         self.assertEqual(item["author"], "maker_unicode")
 
+    def test_reddit_metrics_try_multiple_public_json_hosts_after_403(self):
+        public_json = json.dumps([{"data": {"children": [{"data": {
+            "score": 5100, "num_comments": 75, "author": "actual_maker",
+            "selftext": "I designed, fabricated, assembled, and tested this physical machine.",
+            "url_overridden_by_dest": "https://i.redd.it/machine.jpg",
+        }}]}}]).encode()
+        blocked = maker_weekly.AccessBlocked("HTTP 403")
+        item = {"url": "https://www.reddit.com/r/maker/comments/post123/physical_machine/", "metrics": {}, "evidence": []}
+        with mock.patch.object(maker_weekly, "request_bytes", side_effect=[blocked, blocked, blocked, public_json]) as request:
+            maker_weekly.enrich_reddit_public(item, 10)
+        requested = [call.args[0] for call in request.call_args_list]
+        self.assertEqual(requested[-1], "https://www.reddit.com/comments/post123.json?raw_json=1")
+        self.assertEqual(item["metrics"], {"score": 5100, "comments": 75})
+        self.assertEqual(item["metric_verification"]["status"], "ok")
+
+    def test_reddit_all_public_metric_paths_blocked_is_blocked(self):
+        blocked = maker_weekly.AccessBlocked("HTTP 403")
+        item = {"url": "https://www.reddit.com/r/maker/comments/post123/physical_machine/", "metrics": {}, "evidence": []}
+        with mock.patch.object(maker_weekly, "request_bytes", side_effect=[blocked] * 5):
+            with self.assertRaises(maker_weekly.AccessBlocked):
+                maker_weekly.enrich_reddit_public(item, 10)
+
     def test_rss_detail_failure_preserves_candidate_as_unknown(self):
         feed = b"""<feed xmlns='http://www.w3.org/2005/Atom'><entry><title>Maker video</title><link href='https://www.youtube.com/watch?v=abc123_X'/><published>2026-08-06T00:00:00Z</published></entry></feed>"""
         source = {
@@ -527,11 +549,18 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertNotIn("入选理由", report)
         self.assertNotIn("Top 12", report)
 
-    def test_post_cutoff_heat_cannot_backfill_an_issue(self):
+    def test_execution_time_heat_can_qualify_an_older_completed_week(self):
         item = {"platform": "YouTube", "url": "https://youtube.com/watch?v=abcdef1", "metrics": {"views": 999999}, "metrics_captured_at": "2026-08-12T00:00:00Z"}
         gate = maker_weekly.evaluate_heat_gate(item, datetime(2026, 8, 9, 23, 59, 59, tzinfo=timezone.utc))
+        self.assertEqual(gate["status"], "pass")
+        self.assertEqual(gate["captured_at"], "2026-08-12T00:00:00Z")
+        self.assertEqual(gate["observation_policy"], "execution_time")
+
+    def test_dynamic_heat_without_real_capture_time_fails(self):
+        item = {"platform": "Reddit", "url": "https://reddit.com/r/maker/comments/abc/post", "metrics": {"score": 5000, "comments": 1}}
+        gate = maker_weekly.evaluate_heat_gate(item, datetime(2026, 8, 9, 23, 59, 59, tzinfo=timezone.utc))
         self.assertEqual(gate["status"], "fail")
-        self.assertIn("晚于周末截止", gate["observed"])
+        self.assertIn("真实指标采集时间", gate["observed"])
 
     def test_formal_default_has_all_13_platforms_and_broad_social_rss(self):
         config_path = Path(__file__).parents[1] / "assets" / "config.example.json"

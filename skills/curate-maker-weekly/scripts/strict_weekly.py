@@ -210,8 +210,8 @@ def validate_decision(decision: dict[str, Any], candidate: dict[str, Any], start
     gate = decision.get("heat_gate")
     if not isinstance(gate, dict) or gate.get("status") != "pass" or not gate.get("observed") or not gate.get("threshold") or not gate.get("captured_at") or not is_http_url(gate.get("evidence_url")):
         errors.append("heat_gate must pass with observed value, threshold, capture time, and evidence URL")
-    elif (captured := maker_weekly.parse_datetime(gate.get("captured_at"))) is None or captured > end:
-        errors.append("heat_gate capture time must be on or before the issue cutoff")
+    elif maker_weekly.parse_datetime(gate.get("captured_at")) is None:
+        errors.append("heat_gate capture time must be a valid ISO-8601 observation time")
     category_gate = decision.get("category_gate")
     if not isinstance(category_gate, dict) or category_gate.get("passed") is not True or not category_gate.get("evidence") or not is_http_url(category_gate.get("evidence_url")):
         errors.append("category_gate must prove a physical core with an evidence URL")
@@ -361,7 +361,7 @@ def render(payload: dict[str, Any]) -> str:
             f"- 类别：{decision['category']}",
             f"- 入选类型：{entry_label(decision['entry_type'])}",
             f"- 首次发现日期：{decision['first_seen_date']}",
-            f"- 本周热度：{gate['observed']}；门槛：{gate['threshold']}；抓取：{gate['captured_at']}；证据：{gate['evidence_url']}",
+            f"- 热度（执行时观测）：{gate['observed']}；门槛：{gate['threshold']}；抓取：{gate['captured_at']}；证据：{gate['evidence_url']}",
         ])
         lines.extend([
             f"- 创作者：{creator['name']}；{creator['background']}；证据：{', '.join(creator['evidence_urls'])}",

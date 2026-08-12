@@ -39,6 +39,7 @@ Read [references/editorial-standard.md](references/editorial-standard.md) comple
    ```
 
 8. Research missing facts and update `researched.json` only with observations backed by primary URLs and capture timestamps. If public heat, creator background, build process, first publication date, physical result, or primary evidence cannot be verified, reject the candidate. Never infer a hidden metric from feed order or general popularity.
+   Treat the issue end/`--as-of` value only as the publication-window cutoff. Heat may be observed when the issue is executed after the week ends; preserve the real `metrics_captured_at` and label it as an execution-time observation. Never rewrite it as a historical week-end metric.
 9. Optionally save every researched candidate—not only winners—to an audit snapshot. Never use a snapshot to admit an older project:
 
    ```bash
@@ -60,11 +61,11 @@ Read [references/editorial-standard.md](references/editorial-standard.md) comple
 ## Non-negotiable behavior
 
 - Treat physical outcome as mandatory; software, AI, and code may only support the physical build.
-- Treat platform heat thresholds as hard gates. Unknown, private, conflicting, or post-window metrics do not pass.
+- Treat platform heat thresholds as hard gates. Unknown, private, or conflicting metrics do not pass. A real public metric observed after the target week may pass when the project itself was first published inside the target week; record its actual capture time and do not claim it was the week-end value.
 - Permit only `first_release`, backed by an original-page or official-feed timestamp inside the target week. Do not support a breakout category.
 - For GitHub, search by repository `created` time. A current-week push, release, Star increase, or README update does not make an old repository eligible.
 - For GitHub, reuse the search result's default branch and retrieve README build evidence from raw content URLs; do not spend one GitHub REST request per repository.
-- For YouTube and Reddit, discover broadly from the default RSS bundles (at least 29 verified channels and 20 communities) and verify bounded public detail pages. Preserve Reddit RSS text, author, and media. Percent-encode Unicode Reddit paths, try the public old-Reddit page first, and fall back to the same public post's `.json` representation when score or comments are incomplete. Do not narrow raw discovery with title-only Maker patterns.
+- For YouTube and Reddit, discover broadly from the default RSS bundles (at least 29 verified channels and 20 communities) and verify bounded public detail pages. Preserve Reddit RSS text, author, and media. Percent-encode Unicode Reddit paths, try the public old-Reddit page first, then try the canonical, old-host, short-comments, and public API JSON representations when score or comments are incomplete. Do not narrow raw discovery with title-only Maker patterns.
 - Keep Kickstarter enabled in the formal default. Kicktraq may discover official campaign URLs, but only the official Kickstarter widget may supply launch and heat metrics; use the official project `posts.atom` feed as a fallback for physical build/process evidence.
 - Preserve the exact stage order: platform fetch → raw audit → Make Something Gate → time gate → heat gate → platform Top 5 → cross-platform deduplication → five gates and three red lines → final Top 15.
 - Merge cross-platform duplicates and retain all primary evidence links.

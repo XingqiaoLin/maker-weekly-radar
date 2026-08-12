@@ -115,6 +115,23 @@ class StrictWeeklyTests(unittest.TestCase):
         with self.assertRaises(strict_weekly.StrictError):
             strict_weekly.render(payload)
 
+    def test_strict_decision_accepts_execution_time_heat_after_week_end(self):
+        candidate = {
+            "id": "late-observation", "platform": "YouTube", "title": "Physical build",
+            "url": "https://youtube.com/watch?v=abcdef1", "published_at": "2026-08-07T00:00:00Z",
+            "physical_gate": {"status": "pass"}, "time_gate": {"status": "pass"}, "heat_gate": {"status": "pass"},
+        }
+        decision = {
+            "entry_type": "first_release", "heat_gate": {
+                "status": "pass", "observed": "views=250000", "threshold": "200,000 views",
+                "captured_at": "2026-08-12T00:00:00Z", "evidence_url": candidate["url"],
+            }
+        }
+        start, end = strict_weekly.week_bounds("2026-08-03", "2026-08-09")
+        errors = strict_weekly.validate_decision(decision, candidate, start, end)
+        self.assertNotIn("heat_gate capture time must be on or before the issue cutoff", errors)
+        self.assertFalse(any("capture time" in error for error in errors))
+
 
 if __name__ == "__main__":
     unittest.main()

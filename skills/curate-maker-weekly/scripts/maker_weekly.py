@@ -1274,11 +1274,26 @@ def reddit_old_url(value: str) -> str:
 
 
 def reddit_public_json_url(value: str) -> str:
+    return reddit_public_json_urls(value)[0]
+
+
+def reddit_public_json_urls(value: str) -> list[str]:
     parsed = urllib.parse.urlsplit(value)
     if "reddit.com" not in (parsed.hostname or ""):
         raise RuntimeError("Reddit candidate URL is not hosted on reddit.com")
-    ascii_path = urllib.parse.quote(urllib.parse.unquote(parsed.path), safe="/:@!$&'()*+,;=-._~").rstrip("/") + ".json"
-    return urllib.parse.urlunsplit(("https", "www.reddit.com", ascii_path, "raw_json=1", ""))
+    ascii_path = urllib.parse.quote(urllib.parse.unquote(parsed.path), safe="/:@!$&'()*+,;=-._~").rstrip("/")
+    post_id_match = re.search(r"/comments/([A-Za-z0-9]+)(?:/|$)", ascii_path)
+    post_id = post_id_match.group(1) if post_id_match else ""
+    urls = [
+        urllib.parse.urlunsplit(("https", "www.reddit.com", ascii_path + ".json", "raw_json=1", "")),
+        urllib.parse.urlunsplit(("https", "old.reddit.com", ascii_path + ".json", "raw_json=1", "")),
+    ]
+    if post_id:
+        urls.extend([
+            f"https://www.reddit.com/comments/{post_id}.json?raw_json=1",
+            f"https://api.reddit.com/comments/{post_id}?raw_json=1",
+        ])
+    return list(dict.fromkeys(urls))
 
 
 def reddit_post_from_public_json(raw: bytes) -> dict[str, Any]:
@@ -1335,17 +1350,23 @@ def enrich_reddit_public(item: dict[str, Any], timeout: int) -> None:
     metric_source_url = detail_url
     json_post: dict[str, Any] = {}
     if score is None or comments is None:
-        json_url = reddit_public_json_url(str(item.get("url") or ""))
-        try:
-            json_post = reddit_post_from_public_json(request_bytes(json_url, timeout, headers={"Accept": "application/json"}))
-            score, comments = int(json_post["score"]), int(json_post["num_comments"])
-            metric_source_url = json_url
-            if not item.get("author") and json_post.get("author"):
-                item["author"] = clean_text(json_post["author"], 200)
-        except (AccessBlocked, RuntimeError, UnicodeEncodeError) as json_error:
-            if isinstance(old_error, AccessBlocked) and isinstance(json_error, AccessBlocked):
-                raise AccessBlocked(f"Reddit HTML and public JSON were both blocked: {old_error}; {json_error}") from json_error
-            raise RuntimeError(f"Reddit score/comments unavailable from HTML and public JSON: {old_error or 'incomplete HTML'}; {json_error}") from json_error
+        json_errors: list[Exception] = []
+        for json_url in reddit_public_json_urls(str(item.get("url") or "")):
+            try:
+                json_post = reddit_post_from_public_json(request_bytes(json_url, timeout, headers={"Accept": "application/json"}))
+                score, comments = int(json_post["score"]), int(json_post["num_comments"])
+                metric_source_url = json_url
+                if not item.get("author") and json_post.get("author"):
+                    item["author"] = clean_text(json_post["author"], 200)
+                break
+            except (AccessBlocked, RuntimeError, UnicodeEncodeError) as json_error:
+                json_errors.append(json_error)
+        if score is None or comments is None:
+            all_errors = ([old_error] if old_error is not None else []) + json_errors
+            detail = "; ".join(clean_text(str(error), 180) for error in all_errors) or "all public representations were incomplete"
+            if all_errors and all(isinstance(error, AccessBlocked) for error in all_errors):
+                raise AccessBlocked(f"Reddit HTML and all public JSON representations were blocked: {detail}")
+            raise RuntimeError(f"Reddit score/comments unavailable from public representations: {detail}")
     metrics = item.setdefault("metrics", {})
     metrics.update({"score": score, "comments": comments})
     item["metrics_captured_at"] = iso_z(now_utc())
@@ -1686,6 +1707,7 @@ def collect_raw_envelope(config_path: Path, as_of: datetime, source_ids: set[str
         "config_summary": {
             "lookback_days": lookback_days,
             "strict_current_week_only": bool(config.get("strict_current_week_only", True)),
+            "heat_observation_policy": "execution_time",
             "top_per_source": limit,
             "final_top": int(config.get("final_top", 15)),
             "keywords": keywords,
@@ -1743,6 +1765,7 @@ def metric_number(metrics: dict[str, Any], *names: str) -> float | None:
 
 
 def evaluate_heat_gate(item: dict[str, Any], as_of: datetime) -> dict[str, Any]:
+    """Evaluate heat observed during execution; ``as_of`` only bounds publication."""
     platform = str(item.get("platform") or "").lower().strip()
     metrics = item.get("metrics") if isinstance(item.get("metrics"), dict) else {}
     captured = parse_datetime(item.get("metrics_captured_at"))
@@ -1750,9 +1773,11 @@ def evaluate_heat_gate(item: dict[str, Any], as_of: datetime) -> dict[str, Any]:
     dynamic = any(value in platform for value in (
         "kickstarter", "indiegogo", "github", "youtube", "reddit", "twitter", "instagram", "hackster", "instructables",
     ))
-    if dynamic and (captured is None or captured > as_of):
-        gate.update(status="fail", observed="指标缺少截止日前快照" if captured is None else f"指标抓取时间 {iso_z(captured)} 晚于周末截止")
+    if dynamic and captured is None:
+        gate.update(status="fail", observed="缺少执行周报时的真实指标采集时间")
         return gate
+    if captured is not None:
+        gate["observation_policy"] = "execution_time"
     if "kickstarter" in platform or "indiegogo" in platform:
         pledged, backers = metric_number(metrics, "usd_pledged", "pledged_usd"), metric_number(metrics, "backers")
         gate.update(threshold="US$20,000 或 200 名支持者", observed=f"USD={pledged}; backers={backers}")
@@ -1911,7 +1936,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
     lines = [
         "# 原始发现审计报告（不可发布）",
         "",
-        f"统计截止：{as_of}  ",
+        f"发布日期截止：{as_of}  ",
         f"评选方式：`{payload.get('selection_method', 'unknown')}`",
         "此文件仅记录抓取结果；其中内容不得视为 Maker 候选、入选项目或周报结论。",
         "",

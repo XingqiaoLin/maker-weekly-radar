@@ -11,6 +11,7 @@ It searches 13 public platforms, preserves raw discoveries for audit, requires d
 - Use public no-key collection where it is reliable, with optional official API providers.
 - Avoid per-repository GitHub README API calls, use 29+ verified YouTube channel feeds, cover 20+ Reddit communities through rate-limit-friendly bundles, and use official Kickstarter update feeds when campaign pages are challenged.
 - Accept project media plus documented multi-step fabrication as built-result evidence, and verify Reddit heat through Unicode-safe old-page/JSON fallback paths.
+- Bound eligibility by the project's first-publication week while observing heat at report execution time, with the real metric capture timestamp preserved.
 - Verify public heat metrics instead of treating feed position as popularity.
 - Reject old projects even when they were updated, resurfaced, or crossed a heat threshold this week.
 - Merge cross-platform duplicates and render at most 15 evidence-backed winners.
@@ -46,6 +47,8 @@ python3 skills/curate-maker-weekly/scripts/maker_weekly.py run \
 This writes `raw-discoveries.json`, `physical-candidates.json`, `researched.json`, and an explicitly non-publishable raw audit report. Only strict validated selections may become `final.json`.
 
 The collector fails closed when a platform blocks anonymous access or does not expose verifiable metrics. It does not bypass CAPTCHAs, login walls, rate limits, or Cloudflare challenges. See `skills/curate-maker-weekly/references/providers.md` for provider behavior and optional credentials.
+
+`--as-of` is the target publication cutoff. It is not a historical heat cutoff: metrics collected after that date remain eligible when the project's original publication date is inside the target week, and every metric keeps its actual `metrics_captured_at`.
 
 ## Validate
 
