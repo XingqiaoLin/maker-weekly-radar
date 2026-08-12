@@ -496,8 +496,60 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertTrue(by_id["reddit-rss"]["enabled"])
         self.assertNotIn("required_patterns", by_id["youtube-rss"])
         self.assertNotIn("required_patterns", by_id["reddit-rss"])
-        self.assertGreaterEqual(len(by_id["youtube-rss"]["feed_urls"]), 8)
-        self.assertGreaterEqual(len(by_id["reddit-rss"]["feed_urls"]), 10)
+        self.assertGreaterEqual(len(by_id["youtube-rss"]["feed_urls"]), 29)
+        reddit_communities = set()
+        for url in by_id["reddit-rss"]["feed_urls"]:
+            bundle = url.split("/r/", 1)[1].split("/top/", 1)[0]
+            reddit_communities.update(bundle.split("+"))
+        self.assertGreaterEqual(len(reddit_communities), 20)
+
+    def test_github_physical_gate_reads_raw_readme_without_detail_api(self):
+        readme = b"""# Working Robot\nWe designed and built a working robot device from scratch.\n## Hardware build\nWe printed the enclosure, soldered the sensor circuit, assembled motors, tested the prototype, and iterated.\n![running robot](images/robot.jpg)\n"""
+        item = {
+            "platform": "GitHub", "title": "maker/robot", "url": "https://github.com/maker/robot",
+            "author": "maker", "provider_data": {"default_branch": "trunk"},
+        }
+        with mock.patch.object(maker_weekly, "request_bytes", return_value=readme) as request:
+            gate = maker_weekly.inspect_physical_candidate(item, 10)
+        requested_url = request.call_args.args[0]
+        self.assertEqual(requested_url, "https://raw.githubusercontent.com/maker/robot/trunk/README.md")
+        self.assertNotIn("api.github.com", requested_url)
+        self.assertEqual(gate["status"], "pass")
+
+    def test_kickstarter_official_posts_feed_can_prove_physical_process(self):
+        feed = b"""<feed xmlns='http://www.w3.org/2005/Atom'><entry>
+        <title>Six prototype generations</title>
+        <content type='html'>&lt;p&gt;I designed and built a working robot device from scratch. The first prototype used motors and sensors. We printed the enclosure, assembled the circuit, tested it, and completed six redesign iterations.&lt;/p&gt;&lt;figure&gt;&lt;div url='https://youtube.com/watch?v=abcdef1'&gt;&lt;/div&gt;&lt;/figure&gt;</content>
+        </entry></feed>"""
+        item = {"platform": "Kickstarter", "title": "Physical robot", "url": "https://www.kickstarter.com/projects/maker/physical-robot", "author": "Maker Team"}
+        with mock.patch.object(maker_weekly, "request_bytes", return_value=feed) as request:
+            gate = maker_weekly.inspect_physical_candidate(item, 10)
+        self.assertTrue(request.call_args.args[0].endswith("/posts.atom"))
+        self.assertEqual(gate["status"], "pass")
+
+    def test_rss_embedded_author_text_and_media_feed_physical_gate(self):
+        feed = b"""<feed xmlns='http://www.w3.org/2005/Atom'><entry>
+        <title>I built a working robot device</title><link href='https://www.reddit.com/r/maker/comments/abc123/robot/'/>
+        <published>2026-08-07T00:00:00Z</published><author><name>actual_maker</name></author>
+        <content type='html'>&lt;p&gt;I designed and built this working robot from scratch. I printed the enclosure, soldered the sensor circuit, assembled its motors, tested the prototype and iterated.&lt;/p&gt;&lt;img src='https://i.redd.it/robot-build.jpg'/&gt;</content>
+        </entry></feed>"""
+        source = {"id": "reddit-rss", "type": "rss", "platform": "Reddit", "feed_url": "https://reddit.test/feed"}
+        context = {"timeout": 10, "limit": 10, "since": datetime(2026, 8, 3, tzinfo=timezone.utc), "as_of": datetime(2026, 8, 9, 23, 59, 59, tzinfo=timezone.utc), "lookback_days": 7, "keywords": []}
+        with mock.patch.object(maker_weekly, "request_bytes", return_value=feed):
+            items = maker_weekly.collect_rss(source, context)
+        self.assertEqual(items[0]["author"], "actual_maker")
+        self.assertIn("https://i.redd.it/robot-build.jpg", items[0]["physical_page"]["media_urls"])
+        self.assertEqual(maker_weekly.inspect_physical_candidate(items[0], 10)["status"], "pass")
+
+    def test_reddit_software_agent_post_and_plain_links_fail_physical_gate(self):
+        item = {"platform": "Reddit", "title": "Autoresearch for Robotics Hardware", "url": "https://reddit.com/r/robotics/comments/abc/software", "author": "developer"}
+        page = {
+            "source_url": item["url"],
+            "text": "I let autoresearch coding agents run 1200 code experiments to discover a physics model and new algorithm architectures. The CLI uses git for experiment tracking.",
+            "media_urls": [item["url"], "https://github.com/example/software"], "structured_steps": 5, "author": "developer",
+        }
+        gate = maker_weekly.derive_physical_gate(item, page)
+        self.assertEqual(gate["status"], "fail")
 
 
 if __name__ == "__main__":

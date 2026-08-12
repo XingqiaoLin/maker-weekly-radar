@@ -16,6 +16,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -30,7 +31,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-USER_AGENT = "maker-weekly-radar/0.4"
+USER_AGENT = "maker-weekly-radar/0.5"
 REQUIRED_PLATFORMS = {
     "Kickstarter", "Indiegogo", "GitHub", "Hackaday", "Hackster.io", "Instructables",
     "YouTube", "Reddit", "X / Twitter", "Instagram", "Make Magazine", "The Verge", "Tom's Hardware",
@@ -157,12 +158,20 @@ def request_bytes(
     request_headers = {"Accept": "application/json, application/rss+xml, application/xml;q=0.9, */*;q=0.5", "User-Agent": USER_AGENT}
     request_headers.update(headers or {})
     last_connection_error: urllib.error.URLError | None = None
-    for _attempt in range(3):
+    for attempt in range(3):
         request = urllib.request.Request(url, headers=request_headers, data=data)
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 return response.read()
         except urllib.error.HTTPError as exc:
+            if exc.code == 429 and attempt < 2:
+                retry_after = str(exc.headers.get("Retry-After") or "").strip()
+                try:
+                    delay = min(10.0, max(1.0, float(retry_after)))
+                except ValueError:
+                    delay = float(2 ** attempt)
+                time.sleep(delay)
+                continue
             if exc.code in {401, 403, 429}:
                 raise AccessBlocked(f"HTTP {exc.code} from provider; public collection was blocked or rate-limited") from exc
             raise RuntimeError(f"HTTP {exc.code} from provider") from exc
@@ -267,8 +276,9 @@ def verified_platform_heat_passes(item: dict[str, Any]) -> bool:
 def collect_github(source: dict[str, Any], context: dict[str, Any]) -> list[dict[str, Any]]:
     headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
     token_name = str(source.get("token_env") or "GITHUB_TOKEN")
-    if os.environ.get(token_name):
-        headers["Authorization"] = f"Bearer {os.environ[token_name]}"
+    github_token = os.environ.get(token_name) or os.environ.get("GH_TOKEN")
+    if github_token:
+        headers["Authorization"] = f"Bearer {github_token}"
     queries = source.get("queries") or [source.get("query") or "topic:3d-printing"]
     if not isinstance(queries, list) or not queries:
         raise ConfigError("github source requires a non-empty queries array")
@@ -305,6 +315,7 @@ def collect_github(source: dict[str, Any], context: dict[str, Any]) -> list[dict
             tags=list(repo.get("topics") or []), evidence=[repo.get("html_url")], raw_score=stars + forks * 2 + watchers,
         )
         if item:
+            item["provider_data"] = {"default_branch": str(repo.get("default_branch") or "main")}
             results.append(item)
     return results
 
@@ -592,6 +603,7 @@ EXCLUSION_PATTERNS = (
     r"\b(sdk|api|yocto|operating system|software integration|development environment)\b",
     r"\b(benchmark|performance test|npu test|model inference)\b",
     r"\b(simulation only|mujoco|digital twin only|virtual prototype|reinforcement learning environment)\b",
+    r"\b(autoresearch|coding agents?|code experiments?|algorithm architectures?)\b",
     r"\b(unboxing|product review|hands-on review|buying guide|news roundup)\b",
     r"\b(board game|card game|tabletop game)\b",
     r"\b(concept|rendering|render only|prelaunch|coming soon|story only)\b",
@@ -621,9 +633,16 @@ def matching_terms(text: str, terms: tuple[str, ...]) -> list[str]:
 
 
 def substantive_media_url(value: str) -> bool:
-    lowered = urllib.parse.unquote(value).lower()
+    lowered = urllib.parse.unquote(value).lower().split("?", 1)[0]
     non_evidence = ("shields.io", "badge", "logo", "banner", "screenshot", "avatar", "favicon", "social-preview")
-    return value.startswith(("http://", "https://")) and not any(marker in lowered for marker in non_evidence)
+    if not value.startswith(("http://", "https://")) or any(marker in lowered for marker in non_evidence):
+        return False
+    parsed = urllib.parse.urlsplit(value)
+    host, path = (parsed.hostname or "").lower(), parsed.path.lower()
+    media_suffixes = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".webm", ".mov")
+    media_hosts = {"youtube.com", "www.youtube.com", "youtu.be", "v.redd.it", "i.redd.it", "imgur.com", "i.imgur.com", "i.ytimg.com"}
+    attachment = host == "github.com" and "/user-attachments/assets/" in path
+    return path.endswith(media_suffixes) or host in media_hosts or attachment
 
 
 def explicit_physical_gate(item: dict[str, Any]) -> dict[str, Any] | None:
@@ -693,12 +712,28 @@ def github_readme_page(item: dict[str, Any], timeout: int) -> dict[str, Any]:
     parts = [part for part in parsed.path.split("/") if part]
     if (parsed.hostname or "").lower() != "github.com" or len(parts) < 2:
         raise RuntimeError("invalid GitHub repository URL")
-    api_url = f"https://api.github.com/repos/{urllib.parse.quote(parts[0])}/{urllib.parse.quote(parts[1])}/readme"
-    metadata = request_json(api_url, timeout, headers={"Accept": "application/vnd.github+json"})
-    download_url = str(metadata.get("download_url") or "")
-    if not download_url:
-        raise RuntimeError("GitHub repository has no public README")
-    readme = request_bytes(download_url, timeout, headers={"Accept": "text/plain"}).decode("utf-8", errors="replace")
+    provider_data = item.get("provider_data") if isinstance(item.get("provider_data"), dict) else {}
+    branches = list(dict.fromkeys([str(provider_data.get("default_branch") or ""), "main", "master"]))
+    readme = ""
+    download_url = ""
+    last_error: Exception | None = None
+    # Raw content does not consume GitHub REST API quota. The repository search
+    # response already supplies default_branch, so no per-repository API call is needed.
+    for branch in (value for value in branches if value):
+        for filename in ("README.md", "readme.md", "README.rst", "README.txt"):
+            candidate_url = f"https://raw.githubusercontent.com/{urllib.parse.quote(parts[0])}/{urllib.parse.quote(parts[1])}/{urllib.parse.quote(branch)}/{filename}"
+            try:
+                readme = request_bytes(candidate_url, timeout, headers={"Accept": "text/plain"}).decode("utf-8", errors="replace")
+                download_url = candidate_url
+                break
+            except AccessBlocked:
+                raise
+            except RuntimeError as exc:
+                last_error = exc
+        if readme:
+            break
+    if not readme:
+        raise RuntimeError(f"GitHub repository has no readable public README: {last_error or 'not found'}")
     media = []
     for target in re.findall(r"!\[[^\]]*\]\(([^)]+)\)|<img[^>]+src=[\"']([^\"']+)", readme, flags=re.IGNORECASE):
         value = target[0] or target[1]
@@ -706,6 +741,35 @@ def github_readme_page(item: dict[str, Any], timeout: int) -> dict[str, Any]:
             media.append(urllib.parse.urljoin(download_url, value))
     structured_steps = len(re.findall(r"^#{1,6}\s+.*\b(build|assembly|hardware|mechanical|fabrication|testing|bom|bill of materials)\b", readme, flags=re.IGNORECASE | re.MULTILINE))
     return {"source_url": str(item.get("url")), "text": readme, "media_urls": media, "structured_steps": structured_steps, "author": item.get("author")}
+
+
+def kickstarter_posts_page(item: dict[str, Any], timeout: int) -> dict[str, Any]:
+    parsed = urllib.parse.urlsplit(str(item.get("url") or ""))
+    parts = [part for part in parsed.path.split("/") if part]
+    if (parsed.hostname or "").lower() not in {"kickstarter.com", "www.kickstarter.com"} or len(parts) < 3 or parts[0] != "projects":
+        raise RuntimeError("invalid Kickstarter project URL")
+    feed_url = urllib.parse.urlunsplit(("https", "www.kickstarter.com", "/" + "/".join(parts[:3]) + "/posts.atom", "", ""))
+    raw = request_bytes(feed_url, timeout, headers={"Accept": "application/atom+xml,application/xml"})
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError as exc:
+        raise RuntimeError("Kickstarter official posts feed returned invalid XML") from exc
+    text_parts: list[str] = []
+    media: list[str] = []
+    structured_steps = 0
+    for entry in (node for node in root.iter() if local_name(node.tag) == "entry"):
+        title = child_value(entry, {"title"})
+        content = child_value(entry, {"content", "summary"})
+        text_parts.extend([title, clean_text(content, 10000)])
+        structured_steps += len(re.findall(r"\b(prototype|generation|redesign|build|built|made|making|test|iterat|mechanical development|3d print)\w*\b", content, flags=re.IGNORECASE))
+        media.extend(re.findall(r'(?:src|href|url)=["\'](https?://[^"\']+)', html.unescape(content), flags=re.IGNORECASE))
+    if not text_parts:
+        raise RuntimeError("Kickstarter official posts feed has no public entries")
+    return {
+        "source_url": feed_url, "text": " ".join(text_parts),
+        "media_urls": list(dict.fromkeys(media)), "structured_steps": structured_steps,
+        "author": item.get("author"),
+    }
 
 
 def inspect_physical_candidate(item: dict[str, Any], timeout: int) -> dict[str, Any]:
@@ -718,6 +782,8 @@ def inspect_physical_candidate(item: dict[str, Any], timeout: int) -> dict[str, 
             page = cached_page
         elif "github" in str(item.get("platform") or "").lower():
             page = github_readme_page(item, timeout)
+        elif "kickstarter" in str(item.get("platform") or "").lower():
+            page = kickstarter_posts_page(item, timeout)
         else:
             page_url = str(item.get("url") or "")
             parser, raw_text = parse_public_page(request_bytes(page_url, timeout, headers={"Accept": "text/html,application/xhtml+xml"}))
@@ -1106,9 +1172,35 @@ def local_name(tag: str) -> str:
 
 def child_value(node: ET.Element, names: set[str]) -> str:
     for child in list(node):
-        if local_name(child.tag) in names and child.text:
+        if local_name(child.tag) not in names:
+            continue
+        if child.text and child.text.strip():
             return child.text.strip()
+        for descendant in child.iter():
+            if descendant is not child and descendant.text and descendant.text.strip():
+                return descendant.text.strip()
     return ""
+
+
+def rss_entry_media_urls(entry: ET.Element, raw_content: str) -> list[str]:
+    values = re.findall(r'(?:src|href|url)=["\'](https?://[^"\']+)', html.unescape(raw_content), flags=re.IGNORECASE)
+    for node in entry.iter():
+        if local_name(node.tag) in {"thumbnail", "content", "player", "enclosure"}:
+            value = node.attrib.get("url") or node.attrib.get("href")
+            if value:
+                values.append(value)
+    return list(dict.fromkeys(html.unescape(value) for value in values if substantive_media_url(html.unescape(str(value)))))[:20]
+
+
+def merge_physical_page(item: dict[str, Any], incoming: dict[str, Any]) -> None:
+    existing = item.get("physical_page") if isinstance(item.get("physical_page"), dict) else {}
+    item["physical_page"] = {
+        "source_url": incoming.get("source_url") or existing.get("source_url") or item.get("url"),
+        "text": clean_text(f"{existing.get('text', '')} {incoming.get('text', '')}", 50000),
+        "media_urls": list(dict.fromkeys([str(value) for value in (existing.get("media_urls") or []) + (incoming.get("media_urls") or [])]))[:20],
+        "structured_steps": int(existing.get("structured_steps") or 0) + int(incoming.get("structured_steps") or 0),
+        "author": incoming.get("author") or existing.get("author") or item.get("author"),
+    }
 
 
 def youtube_watch_url(value: str) -> str:
@@ -1153,13 +1245,13 @@ def enrich_youtube_public(item: dict[str, Any], timeout: int) -> None:
     }
     item["evidence"] = list(dict.fromkeys((item.get("evidence") or []) + [detail_url]))
     metadata = public_page_metadata(parser, detail_url)
-    item["physical_page"] = {
+    merge_physical_page(item, {
         "source_url": detail_url,
         "text": f"{metadata['title']} {metadata['summary']} {metadata['visible_text']}",
         "media_urls": page_media_urls(parser, page, detail_url),
         "structured_steps": len(re.findall(r"\b(build|built|making|fabricat|assembl|solder|test|iterat)\w*\b", page, flags=re.IGNORECASE)),
         "author": item.get("author") or metadata.get("author"),
-    }
+    })
     # Normalize both public signals by the editorial heat thresholds. This keeps
     # a subscriber-qualified video comparable with a view-qualified video while
     # preserving views as a useful tie-breaker between videos on one channel.
@@ -1193,6 +1285,8 @@ def enrich_reddit_public(item: dict[str, Any], timeout: int) -> None:
             score = int(attributes["data-score"])
         if str(attributes.get("data-comments-count") or "").isdigit():
             comments = int(attributes["data-comments-count"])
+        if not item.get("author") and attributes.get("data-author"):
+            item["author"] = clean_text(attributes["data-author"], 200)
     if score is None or comments is None:
         description = re.search(
             r'<meta\s+property="og:description"\s+content="[^"]*?•\s*([0-9,]+)\s+points?\s+and\s+([0-9,]+)\s+comments?',
@@ -1212,13 +1306,22 @@ def enrich_reddit_public(item: dict[str, Any], timeout: int) -> None:
     }
     item["evidence"] = list(dict.fromkeys((item.get("evidence") or []) + [detail_url]))
     metadata = public_page_metadata(parser, detail_url)
-    item["physical_page"] = {
+    post_media = []
+    if opening_tag is not None:
+        for key in ("data-url", "data-thumbnail", "data-preview-url"):
+            value = attributes.get(key)
+            if value and str(value).startswith(("http://", "https://")):
+                post_media.append(str(value))
+    for key in ("og:image", "og:video"):
+        if parser.meta.get(key):
+            post_media.append(parser.meta[key])
+    merge_physical_page(item, {
         "source_url": detail_url,
-        "text": f"{metadata['title']} {metadata['summary']} {metadata['visible_text']}",
-        "media_urls": page_media_urls(parser, page, detail_url),
-        "structured_steps": len(re.findall(r"\b(build|built|making|fabricat|assembl|solder|test|iterat)\w*\b", page, flags=re.IGNORECASE)),
+        "text": f"{metadata['title']} {metadata['summary']}",
+        "media_urls": post_media,
+        "structured_steps": 0,
         "author": item.get("author") or metadata.get("author"),
-    }
+    })
     item["_raw_score"] = float(score + comments)
 
 
@@ -1311,7 +1414,18 @@ def collect_rss(source: dict[str, Any], context: dict[str, Any]) -> list[dict[st
                 raw_score=keyword_hits * 10 + max(0, context["lookback_days"] - age_days) + feed_order_score,
             )
             if item:
+                rss_media = rss_entry_media_urls(entry, summary)
+                merge_physical_page(item, {
+                    "source_url": link,
+                    "text": f"{title} {clean_text(summary, 10000)}",
+                    "media_urls": rss_media,
+                    "structured_steps": len(re.findall(r"\b(build|built|making|fabricat|assembl|solder|test|iterat|prototype|from scratch)\w*\b", clean_text(summary, 10000), flags=re.IGNORECASE)),
+                    "author": author,
+                })
                 results.append(item)
+        pause = float(source.get("feed_pause_seconds") or 0)
+        if pause > 0 and feed_url != urls[-1]:
+            time.sleep(min(10.0, pause))
     if failures and not results:
         raise RuntimeError("all RSS feeds failed: " + "; ".join(failures))
     if source.get("detail_enrichment"):

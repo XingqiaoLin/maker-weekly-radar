@@ -62,8 +62,9 @@ Read [references/editorial-standard.md](references/editorial-standard.md) comple
 - Treat platform heat thresholds as hard gates. Unknown, private, conflicting, or post-window metrics do not pass.
 - Permit only `first_release`, backed by an original-page or official-feed timestamp inside the target week. Do not support a breakout category.
 - For GitHub, search by repository `created` time. A current-week push, release, Star increase, or README update does not make an old repository eligible.
-- For YouTube and Reddit, discover broadly from the default RSS bundles and verify bounded public detail pages. Do not narrow raw discovery with title-only Maker patterns. The Make Something, time, and verified heat gates remove nonprojects before selecting the platform Top 5.
-- Keep Kickstarter enabled in the formal default. Kicktraq may discover official campaign URLs, but only the official Kickstarter widget may supply launch and heat metrics.
+- For GitHub, reuse the search result's default branch and retrieve README build evidence from raw content URLs; do not spend one GitHub REST request per repository.
+- For YouTube and Reddit, discover broadly from the default RSS bundles (at least 29 verified channels and 20 communities) and verify bounded public detail pages. Preserve Reddit RSS text, author, and media. Do not narrow raw discovery with title-only Maker patterns.
+- Keep Kickstarter enabled in the formal default. Kicktraq may discover official campaign URLs, but only the official Kickstarter widget may supply launch and heat metrics; use the official project `posts.atom` feed as a fallback for physical build/process evidence.
 - Preserve the exact stage order: platform fetch → raw audit → Make Something Gate → time gate → heat gate → platform Top 5 → cross-platform deduplication → five gates and three red lines → final Top 15.
 - Merge cross-platform duplicates and retain all primary evidence links.
 - Exclude mature-company official mass-market products, ads, product marketing, pure tutorials, replicas, kit assemblies, routine repairs, concepts, renders, food, and AI-only output.

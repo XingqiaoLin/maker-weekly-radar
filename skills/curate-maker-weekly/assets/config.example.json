@@ -40,7 +40,28 @@
         "https://www.youtube.com/feeds/videos.xml?channel_id=UC_7aK9PpYTqt08ERh1MewlQ",
         "https://www.youtube.com/feeds/videos.xml?channel_id=UCj1VqrHhDte54oLgPG4xpuQ",
         "https://www.youtube.com/feeds/videos.xml?channel_id=UC6x7GwJxuoABSosgVXDYtTw",
-        "https://www.youtube.com/feeds/videos.xml?channel_id=UCiDJtJKMICpb9B1qf7qjEOA"
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCiDJtJKMICpb9B1qf7qjEOA",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCUQo7nzH1sXVpzL92VesANw",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UC6mIxFTvXkWQVEHPsEdflzQ",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UC27YZdcPTZM24PgjztxanEQ",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCVc6AHfGw9b2zOE_ZGfmsnw",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCRix1GJvSBNDpEFY561eSzw",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UC5NO8MgTQKHAWXp6z8Xl7yQ",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCp68_FLety0O-n9QU6phsgw",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UC3KEoMzNz8eYnwBC34RaKCQ",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCjgpFI5dU-D1-kh9H1muoxQ",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCfMJ2MchTSW2kWaT0kK94Yw",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCUbDcUPed50Y_7KmfCXKohA",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UC67gfx2Fg7K2NSHqoENVgwA",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCNyGbxoEo6CQvaRVEvItxkA",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UC2avWDLN1EI3r1RZ_dlSxCw",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCtHaxi4GTYDpJgMSGy7AeSw",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCEn3fRj2e0mpqYsijxnzayg",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UC7yF9tV4xWEMZkel7q8La_w",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCFtc3XdXgLFwhlDajMGK69w",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCVSHXNNBitaPd5lYz48--yg",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCzml9bXoEM0itbcE96CB03w",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCu7_D0o48KbfhpEohoP7YSQ"
       ]
     },
     {
@@ -51,17 +72,12 @@
       "detail_enrichment": "reddit_old",
       "detail_candidate_limit": 80,
       "detail_workers": 6,
+      "feed_pause_seconds": 1,
       "feed_urls": [
-        "https://www.reddit.com/r/maker/top/.rss?t=week",
-        "https://www.reddit.com/r/3Dprinting/top/.rss?t=week",
-        "https://www.reddit.com/r/functionalprint/top/.rss?t=week",
-        "https://www.reddit.com/r/somethingimade/top/.rss?t=week",
-        "https://www.reddit.com/r/engineering/top/.rss?t=week",
-        "https://www.reddit.com/r/DIY/top/.rss?t=week",
-        "https://www.reddit.com/r/arduino/top/.rss?t=week",
-        "https://www.reddit.com/r/robotics/top/.rss?t=week",
-        "https://www.reddit.com/r/raspberry_pi/top/.rss?t=week",
-        "https://www.reddit.com/r/diyelectronics/top/.rss?t=week"
+        "https://www.reddit.com/r/maker+functionalprint+somethingimade+engineering+3Dprinting/top/.rss?t=week",
+        "https://www.reddit.com/r/DIY+arduino+robotics+raspberry_pi+diyelectronics/top/.rss?t=week",
+        "https://www.reddit.com/r/woodworking+metalworking+cyberDeck+esp32+PrintedCircuitBoard/top/.rss?t=week",
+        "https://www.reddit.com/r/3DPrintsintheShop+Leathercraft+sewing+upcycling+boatbuilding/top/.rss?t=week"
       ]
     },
     {
