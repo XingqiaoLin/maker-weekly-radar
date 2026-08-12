@@ -58,6 +58,14 @@ Read [references/editorial-standard.md](references/editorial-standard.md) comple
 
 13. Return only the final selected projects, up to 15, plus the required issue statistics. If none pass, publish zero and explain only the aggregate shortfall; do not add rejected projects to the final list.
 
+## Completion contract
+
+- Treat `researched.json` and `researched-strict.json` as intermediate candidate artifacts, never as completion of a full weekly issue request.
+- When at least one editorial candidate exists, continue in the same task through primary-page research, five gates, three red lines, excellence comparison, six-dimension scoring, strict selection, validation, and final rendering. Stop at candidates only when the user explicitly asks for collection, triage, or candidate output without final review.
+- Verify that the page author is the actual maker during the necessary-conditions gate. If a video or article says another person or team made the project, reject it as a third-party review/demo unless it can be merged with an eligible original-creator page whose first publication and platform heat both satisfy the issue rules.
+- Do not score a candidate after any mandatory gate or red line fails. Keep rejection reasons in an editorial audit artifact, but never render rejected candidates in the publishable report.
+- A full weekly task is complete only after `decisions.json`, validated `final.json`, and the rendered weekly Markdown exist, including when the valid final count is zero.
+
 ## Non-negotiable behavior
 
 - Treat physical outcome as mandatory; software, AI, and code may only support the physical build.
@@ -71,4 +79,5 @@ Read [references/editorial-standard.md](references/editorial-standard.md) comple
 - Merge cross-platform duplicates and retain all primary evidence links.
 - Exclude mature-company official mass-market products, ads, product marketing, pure tutorials, replicas, kit assemblies, routine repairs, concepts, renders, food, and AI-only output.
 - Preserve raw discoveries and snapshots for audit. Do not rewrite observed metrics during editorial ranking. Never render raw discoveries through the final report renderer.
+- Never describe editorial candidates as final selections or end a full weekly issue at the candidate stage.
 - Never bypass Cloudflare, CAPTCHAs, login walls, rate limits, or platform access controls. A public-page collector must fail closed and preserve the source failure status when the page does not expose candidates or metrics.

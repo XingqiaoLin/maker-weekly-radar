@@ -15,6 +15,7 @@ It searches 13 public platforms, preserves raw discoveries for audit, requires d
 - Verify public heat metrics instead of treating feed position as popularity.
 - Reject old projects even when they were updated, resurfaced, or crossed a heat threshold this week.
 - Merge cross-platform duplicates and render at most 15 evidence-backed winners.
+- Continue every full weekly run beyond editorial candidates through five gates, three red lines, scoring, strict validation, and final rendering; candidate-only output is opt-in.
 
 ## Install as a Codex Skill
 
