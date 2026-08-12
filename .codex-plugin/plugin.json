@@ -1,0 +1,26 @@
+{
+  "name": "maker-weekly-radar",
+  "version": "0.2.0",
+  "description": "Research and rigorously curate a weekly global Top 15 of verified physical Maker Projects.",
+  "author": {
+    "name": "Xingqiao Lin",
+    "url": "https://github.com/XingqiaoLin"
+  },
+  "homepage": "https://github.com/XingqiaoLin/maker-weekly-radar#readme",
+  "repository": "https://github.com/XingqiaoLin/maker-weekly-radar",
+  "license": "MIT",
+  "keywords": ["maker", "hardware", "weekly", "research", "curation"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Maker 周报",
+    "shortDescription": "严格核验全球实体 Maker Project 并评选每周 Top 15。",
+    "longDescription": "从全球众筹、Maker、工程、视频、社区与科技媒体平台检索候选，执行完整自然周、公开热度、五关三红线、首发/翻红快照和六维评分，最多评选 15 个真实落地的实体 Maker Project。",
+    "developerName": "Xingqiao Lin",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write", "Network"],
+    "defaultPrompt": [
+      "按严格标准生成最近完整自然周的 Maker Project Top 15。",
+      "检查候选证据、热度门槛和首发/翻红快照。"
+    ]
+  }
+}

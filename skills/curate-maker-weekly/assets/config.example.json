@@ -1,0 +1,191 @@
+{
+  "lookback_days": 7,
+  "top_per_source": 5,
+  "final_top": 15,
+  "request_timeout_seconds": 20,
+  "keywords": ["maker", "diy", "open hardware", "robot", "robotics", "wearable", "mechanical", "electronics", "fabrication", "3d print", "cnc", "kinetic"],
+  "sources": [
+    {
+      "id": "github",
+      "type": "github",
+      "enabled": true,
+      "platform": "GitHub",
+      "queries": [
+        "topic:open-hardware",
+        "topic:robotics hardware in:name,description,readme",
+        "\"diy hardware\" in:name,description,readme",
+        "\"3d printing\" in:name,description,readme",
+        "wearable hardware in:name,description,readme"
+      ],
+      "required_terms": ["open hardware", "open-hardware", "robot", "hardware", "3d print", "3d-print", "wearable", "mechanical", "electronics", "fabrication"],
+      "date_qualifier": "pushed",
+      "token_env": "GITHUB_TOKEN"
+    },
+    {
+      "id": "youtube-rss",
+      "type": "rss",
+      "enabled": true,
+      "platform": "YouTube",
+      "detail_enrichment": "youtube_public",
+      "detail_candidate_limit": 20,
+      "detail_workers": 4,
+      "feed_urls": [
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCxQbYGpbdrh-b2ND-AfIybg",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCbgBDBrwsikmtoLqtpc59Bw",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCiczXOhGpvoQGhOL16EZiTg",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCb8Rde3uRL1ohROUVg46h1A",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UC_7aK9PpYTqt08ERh1MewlQ"
+      ]
+    },
+    {
+      "id": "reddit-rss",
+      "type": "rss",
+      "enabled": true,
+      "platform": "Reddit",
+      "detail_enrichment": "reddit_old",
+      "detail_candidate_limit": 20,
+      "detail_workers": 4,
+      "feed_urls": [
+        "https://www.reddit.com/r/maker/top/.rss?t=week",
+        "https://www.reddit.com/r/3Dprinting/top/.rss?t=week",
+        "https://www.reddit.com/r/functionalprint/top/.rss?t=week",
+        "https://www.reddit.com/r/somethingimade/top/.rss?t=week",
+        "https://www.reddit.com/r/engineering/top/.rss?t=week"
+      ]
+    },
+    {
+      "id": "youtube-api",
+      "type": "youtube",
+      "enabled": false,
+      "platform": "YouTube API",
+      "query": "maker project OR DIY hardware OR open hardware",
+      "api_key_env": "YOUTUBE_API_KEY",
+      "region_code": "US",
+      "relevance_language": "en"
+    },
+    {
+      "id": "reddit-api",
+      "type": "reddit",
+      "enabled": false,
+      "platform": "Reddit API",
+      "subreddits": ["3Dprinting", "functionalprint", "3DPrintTech"],
+      "client_id_env": "REDDIT_CLIENT_ID",
+      "client_secret_env": "REDDIT_CLIENT_SECRET",
+      "user_agent": "linux:maker-weekly-radar:v0.1 (by /u/YOUR_REDDIT_USERNAME)"
+    },
+    {
+      "id": "instagram-api",
+      "type": "instagram",
+      "enabled": false,
+      "platform": "Instagram",
+      "hashtags": ["3dprinting", "3dprinted"],
+      "access_token_env": "INSTAGRAM_ACCESS_TOKEN",
+      "user_id_env": "INSTAGRAM_USER_ID",
+      "api_version": "v23.0"
+    },
+    {
+      "id": "kickstarter",
+      "type": "kickstarter_kicktraq",
+      "enabled": true,
+      "platform": "Kickstarter",
+      "listing_urls": [
+        "https://www.kicktraq.com/categories/technology/3d%20printing/?sort=new",
+        "https://www.kicktraq.com/categories/technology/diy%20electronics/?sort=new",
+        "https://www.kicktraq.com/categories/technology/fabrication%20tools/?sort=new",
+        "https://www.kicktraq.com/categories/technology/gadgets/?sort=new",
+        "https://www.kicktraq.com/categories/technology/hardware/?sort=new",
+        "https://www.kicktraq.com/categories/technology/robots/?sort=new",
+        "https://www.kicktraq.com/categories/technology/wearables/?sort=new"
+      ],
+      "detail_candidate_limit": 49,
+      "detail_workers": 6,
+      "keywords": ["diy", "robot", "hardware", "3d print", "printer", "cnc", "laser", "wearable", "electronics", "fabrication", "open source", "device", "machine"]
+    },
+    {
+      "id": "indiegogo",
+      "type": "indiegogo_public",
+      "enabled": true,
+      "platform": "Indiegogo",
+      "endpoint": "https://www.indiegogo.com/api/public/projects/getActiveCrowdfundingProjects",
+      "keywords": ["diy", "robot", "hardware", "3d print", "printer", "cnc", "laser", "wearable", "electronics", "fabrication", "open source", "device", "machine"]
+    },
+    {
+      "id": "hackster",
+      "type": "rss",
+      "enabled": true,
+      "platform": "Hackster.io",
+      "feed_url": "https://www.hackster.io/projects?format=atom&by=featured&sort=published",
+      "static_metrics": {"featured": true}
+    },
+    {
+      "id": "instructables",
+      "type": "instructables_web",
+      "enabled": true,
+      "platform": "Instructables",
+      "bootstrap_url": "https://www.instructables.com/circuits/projects/",
+      "categories": ["Circuits", "Workshop", "Design", "Craft", "Living", "Outside"]
+    },
+    {
+      "id": "x-twitter",
+      "type": "web_html",
+      "enabled": true,
+      "platform": "X / Twitter",
+      "listing_urls": [
+        "https://x.com/search?q=%28%22maker%20project%22%20OR%20%22built%20from%20scratch%22%29%20filter%3Amedia&src=typed_query&f=live"
+      ],
+      "link_pattern": "^https://x\\.com/[^/]+/status/[0-9]+$",
+      "metric_patterns": {
+        "likes": ["([0-9][0-9,.]*\\s*[KMB]?)\\s+Likes?"],
+        "replies": ["([0-9][0-9,.]*\\s*[KMB]?)\\s+Replies?"],
+        "reposts": ["([0-9][0-9,.]*\\s*[KMB]?)\\s+Reposts?"],
+        "quotes": ["([0-9][0-9,.]*\\s*[KMB]?)\\s+Quotes?"]
+      }
+    },
+    {
+      "id": "instagram-web",
+      "type": "web_html",
+      "enabled": true,
+      "platform": "Instagram",
+      "listing_urls": [
+        "https://www.instagram.com/explore/tags/makerproject/",
+        "https://www.instagram.com/explore/tags/diyhardware/"
+      ],
+      "link_pattern": "^https://www\\.instagram\\.com/(?:p|reel)/[^/]+/?$",
+      "metric_patterns": {
+        "likes": ["([0-9][0-9,.]*\\s*[KMB]?)\\s+likes?"],
+        "comments": ["([0-9][0-9,.]*\\s*[KMB]?)\\s+comments?"]
+      }
+    },
+    {
+      "id": "hackaday",
+      "type": "rss",
+      "enabled": true,
+      "platform": "Hackaday",
+      "feed_url": "https://hackaday.com/blog/feed/",
+      "keywords": ["build", "diy", "maker", "robot", "hardware", "mechanical", "electronics", "3d print", "cnc", "wearable"]
+    },
+    {
+      "id": "make-magazine",
+      "type": "rss",
+      "enabled": true,
+      "platform": "Make Magazine",
+      "feed_url": "https://makezine.com/feed/"
+    },
+    {
+      "id": "the-verge",
+      "type": "rss",
+      "enabled": true,
+      "platform": "The Verge",
+      "feed_url": "https://www.theverge.com/rss/index.xml",
+      "keywords": ["maker", "diy", "robot", "hardware", "wearable", "built", "mod"]
+    },
+    {
+      "id": "toms-hardware",
+      "type": "rss",
+      "enabled": true,
+      "platform": "Tom's Hardware",
+      "feed_url": "https://www.tomshardware.com/feeds/all",
+      "keywords": ["maker", "diy", "robot", "raspberry pi", "arduino", "3d print", "mod"]
+    }
+  ]
+}

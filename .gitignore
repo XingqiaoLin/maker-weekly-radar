@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# Runtime data and editorial artifacts
+output/
+demo-output/
+no-api-output/
+strict-output/
+web-attempt-output/
+snapshots/
+maker-weekly.json
