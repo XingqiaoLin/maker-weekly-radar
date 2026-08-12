@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-USER_AGENT = "maker-weekly-radar/0.5"
+USER_AGENT = "maker-weekly-radar/0.6"
 REQUIRED_PLATFORMS = {
     "Kickstarter", "Indiegogo", "GitHub", "Hackaday", "Hackster.io", "Instructables",
     "YouTube", "Reddit", "X / Twitter", "Instagram", "Make Magazine", "The Verge", "Tom's Hardware",
@@ -683,7 +683,11 @@ def derive_physical_gate(item: dict[str, Any], page: dict[str, Any]) -> dict[str
     video_project_claim = "youtube" in platform and bool(media_urls) and strong_physical and bool(process_hits) and not excluded
     creator_made = first_person_make or (trusted_creator_page and author_known and (structured_steps >= 2 or len(set(process_hits)) >= 2)) or video_project_claim
     physical_core = strong_physical and not excluded
-    built_result = bool(media_urls) and bool(result_hits) and physical_core
+    # A direct project photo/video plus a documented multi-step build is itself
+    # evidence of a built result or substantive prototype. Do not require the
+    # prose to contain English completion words such as "finished" or "working".
+    documented_progress = structured_steps >= 2 or (creator_made and len(set(process_hits)) >= 2)
+    built_result = bool(media_urls) and physical_core and (bool(result_hits) or documented_progress)
     human_process = (structured_steps >= 2 or len(set(process_hits)) >= 2) and creator_made
     checks = {
         "creator_made_physical": bool(creator_made),
@@ -1265,56 +1269,116 @@ def reddit_old_url(value: str) -> str:
     parsed = urllib.parse.urlsplit(value)
     if "reddit.com" not in (parsed.hostname or ""):
         raise RuntimeError("Reddit candidate URL is not hosted on reddit.com")
-    return urllib.parse.urlunsplit(("https", "old.reddit.com", parsed.path, "", ""))
+    ascii_path = urllib.parse.quote(urllib.parse.unquote(parsed.path), safe="/:@!$&'()*+,;=-._~")
+    return urllib.parse.urlunsplit(("https", "old.reddit.com", ascii_path, "", ""))
+
+
+def reddit_public_json_url(value: str) -> str:
+    parsed = urllib.parse.urlsplit(value)
+    if "reddit.com" not in (parsed.hostname or ""):
+        raise RuntimeError("Reddit candidate URL is not hosted on reddit.com")
+    ascii_path = urllib.parse.quote(urllib.parse.unquote(parsed.path), safe="/:@!$&'()*+,;=-._~").rstrip("/") + ".json"
+    return urllib.parse.urlunsplit(("https", "www.reddit.com", ascii_path, "raw_json=1", ""))
+
+
+def reddit_post_from_public_json(raw: bytes) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Reddit public JSON representation was invalid") from exc
+    if not isinstance(payload, list) or not payload:
+        raise RuntimeError("Reddit public JSON representation had no listing")
+    listing = payload[0] if isinstance(payload[0], dict) else {}
+    children = (listing.get("data") or {}).get("children") or []
+    post = (children[0].get("data") or {}) if children and isinstance(children[0], dict) else {}
+    if not isinstance(post.get("score"), (int, float)) or not isinstance(post.get("num_comments"), (int, float)):
+        raise RuntimeError("Reddit public JSON exposed neither a complete score nor comment count")
+    return post
 
 
 def enrich_reddit_public(item: dict[str, Any], timeout: int) -> None:
     detail_url = reddit_old_url(str(item.get("url") or ""))
-    raw = request_bytes(detail_url, timeout, headers={"Accept": "text/html,application/xhtml+xml"})
-    parser, page = parse_public_page(raw)
     post_id_match = re.search(r"/comments/([A-Za-z0-9]+)/", detail_url)
     post_id = post_id_match.group(1) if post_id_match else ""
-    opening_tag = re.search(rf'<div\b[^>]*\bid="thing_t3_{re.escape(post_id)}"[^>]*>', page, flags=re.IGNORECASE)
-    if opening_tag is None:
-        opening_tag = re.search(r'<div\b[^>]*\bdata-type="link"[^>]*\bdata-score="[0-9]+"[^>]*>', page, flags=re.IGNORECASE)
+    parser: PublicPageParser | None = None
+    page = ""
+    opening_tag: re.Match[str] | None = None
+    attributes: dict[str, str] = {}
     score: int | None = None
     comments: int | None = None
-    if opening_tag is not None:
-        attributes = dict(re.findall(r'([A-Za-z0-9_-]+)="([^"]*)"', opening_tag.group(0)))
-        if str(attributes.get("data-score") or "").isdigit():
-            score = int(attributes["data-score"])
-        if str(attributes.get("data-comments-count") or "").isdigit():
-            comments = int(attributes["data-comments-count"])
-        if not item.get("author") and attributes.get("data-author"):
-            item["author"] = clean_text(attributes["data-author"], 200)
+    old_error: Exception | None = None
+    try:
+        raw = request_bytes(detail_url, timeout, headers={"Accept": "text/html,application/xhtml+xml"})
+        parser, page = parse_public_page(raw)
+        opening_tag = re.search(rf'<div\b[^>]*\bid="thing_t3_{re.escape(post_id)}"[^>]*>', page, flags=re.IGNORECASE)
+        if opening_tag is None:
+            opening_tag = re.search(r'<div\b[^>]*\bdata-type="link"[^>]*\bdata-score="[0-9]+"[^>]*>', page, flags=re.IGNORECASE)
+        if opening_tag is not None:
+            attributes = dict(re.findall(r'([A-Za-z0-9_-]+)="([^"]*)"', opening_tag.group(0)))
+            if str(attributes.get("data-score") or "").isdigit():
+                score = int(attributes["data-score"])
+            if str(attributes.get("data-comments-count") or "").isdigit():
+                comments = int(attributes["data-comments-count"])
+            if not item.get("author") and attributes.get("data-author"):
+                item["author"] = clean_text(attributes["data-author"], 200)
+        if score is None or comments is None:
+            description = re.search(
+                r'<meta\s+property="og:description"\s+content="[^"]*?•\s*([0-9,]+)\s+points?\s+and\s+([0-9,]+)\s+comments?',
+                page, flags=re.IGNORECASE,
+            )
+            if description:
+                score = int(description.group(1).replace(",", ""))
+                comments = int(description.group(2).replace(",", ""))
+    except (AccessBlocked, RuntimeError, UnicodeEncodeError) as exc:
+        old_error = exc
+
+    metric_source_url = detail_url
+    json_post: dict[str, Any] = {}
     if score is None or comments is None:
-        description = re.search(
-            r'<meta\s+property="og:description"\s+content="[^"]*?•\s*([0-9,]+)\s+points?\s+and\s+([0-9,]+)\s+comments?',
-            page, flags=re.IGNORECASE,
-        )
-        if description:
-            score = int(description.group(1).replace(",", ""))
-            comments = int(description.group(2).replace(",", ""))
-    if score is None or comments is None:
-        raise RuntimeError("Reddit old page exposed neither a complete score nor comment count")
+        json_url = reddit_public_json_url(str(item.get("url") or ""))
+        try:
+            json_post = reddit_post_from_public_json(request_bytes(json_url, timeout, headers={"Accept": "application/json"}))
+            score, comments = int(json_post["score"]), int(json_post["num_comments"])
+            metric_source_url = json_url
+            if not item.get("author") and json_post.get("author"):
+                item["author"] = clean_text(json_post["author"], 200)
+        except (AccessBlocked, RuntimeError, UnicodeEncodeError) as json_error:
+            if isinstance(old_error, AccessBlocked) and isinstance(json_error, AccessBlocked):
+                raise AccessBlocked(f"Reddit HTML and public JSON were both blocked: {old_error}; {json_error}") from json_error
+            raise RuntimeError(f"Reddit score/comments unavailable from HTML and public JSON: {old_error or 'incomplete HTML'}; {json_error}") from json_error
     metrics = item.setdefault("metrics", {})
     metrics.update({"score": score, "comments": comments})
     item["metrics_captured_at"] = iso_z(now_utc())
     item["metric_verification"] = {
-        "status": "ok", "source_url": detail_url, "captured_at": item["metrics_captured_at"],
+        "status": "ok", "source_url": metric_source_url, "captured_at": item["metrics_captured_at"],
         "ranking_basis": "score + comments",
     }
-    item["evidence"] = list(dict.fromkeys((item.get("evidence") or []) + [detail_url]))
-    metadata = public_page_metadata(parser, detail_url)
+    item["evidence"] = list(dict.fromkeys((item.get("evidence") or []) + [str(item.get("url") or ""), metric_source_url]))
+    metadata = public_page_metadata(parser, detail_url) if parser is not None else {"title": "", "summary": "", "author": ""}
     post_media = []
     if opening_tag is not None:
         for key in ("data-url", "data-thumbnail", "data-preview-url"):
             value = attributes.get(key)
             if value and str(value).startswith(("http://", "https://")):
                 post_media.append(str(value))
-    for key in ("og:image", "og:video"):
-        if parser.meta.get(key):
-            post_media.append(parser.meta[key])
+    if parser is not None:
+        for key in ("og:image", "og:video"):
+            if parser.meta.get(key):
+                post_media.append(parser.meta[key])
+    if json_post:
+        destination = str(json_post.get("url_overridden_by_dest") or "")
+        if substantive_media_url(destination):
+            post_media.append(destination)
+        preview = json_post.get("preview") if isinstance(json_post.get("preview"), dict) else {}
+        images = preview.get("images") if isinstance(preview.get("images"), list) else []
+        if images and isinstance(images[0], dict):
+            source = images[0].get("source") if isinstance(images[0].get("source"), dict) else {}
+            if source.get("url"):
+                post_media.append(html.unescape(str(source["url"])))
+        merge_physical_page(item, {
+            "source_url": str(item.get("url") or detail_url), "text": clean_text(json_post.get("selftext"), 10000),
+            "media_urls": post_media, "structured_steps": 0, "author": item.get("author"),
+        })
     merge_physical_page(item, {
         "source_url": detail_url,
         "text": f"{metadata['title']} {metadata['summary']}",

@@ -10,6 +10,7 @@ It searches 13 public platforms, preserves raw discoveries for audit, requires d
 - Collect from Kickstarter, Indiegogo, GitHub, Hackaday, Hackster, Instructables, YouTube, Reddit, X, Instagram, Make Magazine, The Verge, and Tom's Hardware.
 - Use public no-key collection where it is reliable, with optional official API providers.
 - Avoid per-repository GitHub README API calls, use 29+ verified YouTube channel feeds, cover 20+ Reddit communities through rate-limit-friendly bundles, and use official Kickstarter update feeds when campaign pages are challenged.
+- Accept project media plus documented multi-step fabrication as built-result evidence, and verify Reddit heat through Unicode-safe old-page/JSON fallback paths.
 - Verify public heat metrics instead of treating feed position as popularity.
 - Reject old projects even when they were updated, resurfaced, or crossed a heat threshold this week.
 - Merge cross-platform duplicates and render at most 15 evidence-backed winners.

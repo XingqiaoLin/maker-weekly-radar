@@ -202,6 +202,23 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertEqual(item["metric_verification"]["ranking_basis"], "score + comments")
         self.assertEqual(item["_raw_score"], 65)
 
+    def test_reddit_unicode_url_uses_ascii_safe_public_json_fallback(self):
+        old_page = b"<html><head><title>post</title></head><body>No public score here</body></html>"
+        public_json = json.dumps([{"data": {"children": [{"data": {
+            "score": 4900, "num_comments": 100, "author": "maker_unicode",
+            "selftext": "I designed and built a working robot device, assembled and tested the prototype.",
+            "url_overridden_by_dest": "https://i.redd.it/robot.jpg",
+        }}]}}]).encode()
+        item = {"url": "https://www.reddit.com/r/maker/comments/post123/日本語项目/", "metrics": {}, "evidence": []}
+        with mock.patch.object(maker_weekly, "request_bytes", side_effect=[old_page, public_json]) as request:
+            maker_weekly.enrich_reddit_public(item, 10)
+        requested = [call.args[0] for call in request.call_args_list]
+        self.assertTrue(all(url.isascii() for url in requested))
+        self.assertTrue(requested[1].endswith("/%E6%97%A5%E6%9C%AC%E8%AA%9E%E9%A1%B9%E7%9B%AE.json?raw_json=1"))
+        self.assertEqual(item["metrics"], {"score": 4900, "comments": 100})
+        self.assertEqual(item["metric_verification"]["status"], "ok")
+        self.assertEqual(item["author"], "maker_unicode")
+
     def test_rss_detail_failure_preserves_candidate_as_unknown(self):
         feed = b"""<feed xmlns='http://www.w3.org/2005/Atom'><entry><title>Maker video</title><link href='https://www.youtube.com/watch?v=abc123_X'/><published>2026-08-06T00:00:00Z</published></entry></feed>"""
         source = {
@@ -434,6 +451,36 @@ class MakerWeeklyTests(unittest.TestCase):
         gate = maker_weekly.derive_physical_gate(item, page)
         self.assertEqual(gate["status"], "pass")
         self.assertTrue(all(gate["checks"].values()))
+
+    def test_instructables_steps_and_photo_prove_lia_built_result_without_result_words(self):
+        item = {
+            "title": "LIA — an Open-Source, Off-Grid LoRa Pet Tracker", "platform": "Instructables",
+            "url": "https://www.instructables.com/LIA-an-Open-Source-Off-Grid-LoRa-Pet-Asset-Tracker/", "author": "Jon G Aguado",
+        }
+        page = {
+            "source_url": item["url"],
+            "text": "LoRa pet tracker device with sensor circuit, battery enclosure, PCB wiring and firmware configuration.",
+            "media_urls": ["https://content.instructables.com/FQI/UT2J/MS6P5N4X/FQIUT2JMS6P5N4X.png"],
+            "structured_steps": 9, "author": item["author"],
+        }
+        gate = maker_weekly.derive_physical_gate(item, page)
+        self.assertEqual(gate["status"], "pass")
+        self.assertTrue(gate["checks"]["built_result_visible"])
+
+    def test_instructables_photo_and_clear_process_prove_steering_wheel_result(self):
+        item = {
+            "title": "Build Your Own Steering Wheel Gaming Setup", "platform": "Instructables",
+            "url": "https://www.instructables.com/Build-Your-Own-Steering-Wheel-Gaming-Setup/", "author": "Upside Down Labs",
+        }
+        page = {
+            "source_url": item["url"],
+            "text": "DIY steering wheel device with a 3D printed enclosure, sensor circuit, wiring, CAD and drilled metal parts.",
+            "media_urls": ["https://content.instructables.com/FXP/JKJZ/MS6P3XX7/FXPJKJZMS6P3XX7.jpg"],
+            "structured_steps": 0, "author": item["author"],
+        }
+        gate = maker_weekly.derive_physical_gate(item, page)
+        self.assertEqual(gate["status"], "pass")
+        self.assertTrue(gate["checks"]["built_result_visible"])
 
     def test_readme_badges_logos_and_screenshots_are_not_physical_evidence(self):
         item = {"title": "Robot hardware toolkit", "platform": "GitHub", "url": "https://github.com/example/tool", "author": "Developer"}
