@@ -1184,7 +1184,7 @@ PHYSICAL_TERMS = (
     "tracker", "filter", "sculpture", "installation", "hardware", "mechanical", "assembly", "battery", "solder",
 )
 PROCESS_TERMS = (
-    "built", "build", "made", "making", "designed", "fabricated", "machined", "assembled", "assembly", "printed",
+    "built", "build", "made", "making", "created", "creating", "designed", "fabricated", "machined", "assembled", "assembly", "printed",
     "printing", "soldered", "soldering", "wired", "wiring", "cut", "drilled", "prototype", "iterated", "iteration",
     "tested", "testing", "cad", "bom", "bill of materials", "step 1", "step 2", "how i made", "from scratch", "diy",
 )
@@ -1193,7 +1193,7 @@ RESULT_TERMS = (
     "tested", "testing", "assembled", "built", "made", "completed", "result", "version 2", "iteration",
 )
 EXCLUSION_PATTERNS = (
-    r"\b(music|album|song|film|movie|novel|story|fiction)\b",
+    r"\b(music|album|song|film|movie|novel|fiction)\b",
     r"\b(ebook|e-book|whitepaper|toolkit|business starter kit|operator toolkit)\b",
     r"\b(guide|knowledge base|knowledge navigation|course|curriculum|tutorial collection)\b",
     r"\b(sdk|api|yocto|operating system|software integration|development environment)\b",
@@ -1202,10 +1202,11 @@ EXCLUSION_PATTERNS = (
     r"\b(autoresearch|coding agents?|code experiments?|algorithm architectures?)\b",
     r"\b(unboxing|mailbag|what(?:'s| is) in the mail|product review|hands-on review|buying guide|news roundup)\b",
     r"\b(board game|card game|tabletop game)\b",
-    r"\b(concept|rendering|render only|prelaunch|coming soon|story only)\b",
+    r"\b(concept only|concept art|concept rendering|rendering|render only|prelaunch|coming soon|story only)\b",
     r"\b(recipe|cooking|baking|food)\b",
 )
 TRUSTED_CREATOR_PLATFORMS = ("github", "hackster", "instructables", "youtube", "reddit", "kickstarter", "indiegogo", "instagram", "twitter")
+EDITORIAL_REPORT_PLATFORMS = ("hackaday", "make magazine", "the verge", "tom's hardware", "tom’s hardware")
 
 
 def page_media_urls(parser: PublicPageParser, raw_text: str, page_url: str) -> list[str]:
@@ -1269,16 +1270,45 @@ def derive_physical_gate(item: dict[str, Any], page: dict[str, Any]) -> dict[str
     physical_hits = matching_terms(text, PHYSICAL_TERMS)
     process_hits = matching_terms(text, PROCESS_TERMS)
     result_hits = matching_terms(text, RESULT_TERMS)
-    excluded = [pattern for pattern in EXCLUSION_PATTERNS if re.search(pattern, text, flags=re.IGNORECASE)]
+    # Classify the content from its title/summary rather than the entire HTML
+    # page. News sites append navigation, related-story, recipe, and buying-
+    # guide labels to visible text; those chrome words are not evidence that
+    # the reported project itself belongs to an excluded category.
+    classification_text = clean_text(" ".join([
+        str(item.get("title") or ""), str(item.get("summary") or ""),
+    ]), 5000) or text[:2000]
+    classification_physical_hits = matching_terms(classification_text, PHYSICAL_TERMS)
+    classification_process_hits = matching_terms(classification_text, PROCESS_TERMS)
+    excluded = [
+        pattern for pattern in EXCLUSION_PATTERNS
+        if re.search(pattern, classification_text, flags=re.IGNORECASE)
+    ]
     strong_physical = len(set(physical_hits)) >= 2
     structured_steps = int(page.get("structured_steps") or 0)
     first_person_make = bool(re.search(r"\b(i|we|my team)\s+(built|made|designed|fabricated|assembled|printed|created)\b", text, flags=re.IGNORECASE))
     platform = str(item.get("platform") or "").lower()
     trusted_creator_page = any(value in platform for value in TRUSTED_CREATOR_PLATFORMS)
+    editorial_report = any(value in platform for value in EDITORIAL_REPORT_PLATFORMS)
     author_known = bool(str(item.get("author") or page.get("author") or "").strip())
     video_project_claim = "youtube" in platform and bool(media_urls) and strong_physical and bool(process_hits) and not excluded
-    creator_made = first_person_make or (trusted_creator_page and author_known and (structured_steps >= 2 or len(set(process_hits)) >= 2)) or video_project_claim
-    physical_core = strong_physical and not excluded
+    reported_physical_build = (
+        editorial_report
+        and bool(media_urls)
+        and len(set(classification_physical_hits)) >= 2
+        and bool(classification_process_hits)
+        and len(set(process_hits)) >= 2
+        and bool(result_hits)
+    )
+    creator_made = (
+        first_person_make
+        or (trusted_creator_page and author_known and (structured_steps >= 2 or len(set(process_hits)) >= 2))
+        or video_project_claim
+        or reported_physical_build
+    )
+    physical_core = (
+        (len(set(classification_physical_hits)) >= 2 if editorial_report else strong_physical)
+        and not excluded
+    )
     # A direct project photo/video plus a documented multi-step build is itself
     # evidence of a built result or substantive prototype. Do not require the
     # prose to contain English completion words such as "finished" or "working".

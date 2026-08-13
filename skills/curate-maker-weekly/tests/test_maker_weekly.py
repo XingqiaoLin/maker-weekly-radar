@@ -1325,6 +1325,46 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertEqual(gate["status"], "pass")
         self.assertTrue(all(gate["checks"].values()))
 
+    def test_zero_gate_accepts_editorial_report_of_a_documented_physical_build(self):
+        item = {
+            "title": "Robotic Screw And Bolt Sorter Seeks A New Challenge",
+            "summary": "A maker created an automatic robot machine with a camera to sort bolts and screws.",
+            "platform": "Hackaday", "url": "https://hackaday.test/bolt-sorter",
+        }
+        page = {
+            "source_url": item["url"],
+            "text": (
+                "Aad created a working automatic sorting machine. A camera and machine vision detect each screw. "
+                "A conveyor feeds the parts onto an illuminated platform, then a robotic gripper picks them up. "
+                "The mechanism was built, assembled, tested, and improved as a physical prototype. "
+                "Site navigation: latest stories, food hacks, buying guide, recipes."
+            ),
+            "media_urls": ["https://hackaday.test/images/bolt-sorter.jpg"],
+            "structured_steps": 4,
+        }
+        gate = maker_weekly.derive_physical_gate(item, page)
+        self.assertEqual(gate["status"], "pass")
+        self.assertTrue(all(gate["checks"].values()))
+
+    def test_zero_gate_rejects_media_news_despite_unrelated_page_chrome(self):
+        item = {
+            "title": "A new AI moderator is coming",
+            "summary": "A policy update about an LLM moderation service.",
+            "platform": "The Verge", "url": "https://theverge.test/ai-news",
+        }
+        page = {
+            "source_url": item["url"],
+            "text": (
+                "The article discusses a software policy update. Related stories and navigation mention a maker "
+                "who built, assembled and tested a working robot machine with a camera, motor and circuit."
+            ),
+            "media_urls": ["https://theverge.test/images/site-card.jpg"],
+            "structured_steps": 6,
+        }
+        gate = maker_weekly.derive_physical_gate(item, page)
+        self.assertEqual(gate["status"], "fail")
+        self.assertFalse(gate["checks"]["physical_is_core"])
+
     def test_instructables_steps_and_photo_prove_lia_built_result_without_result_words(self):
         item = {
             "title": "LIA — an Open-Source, Off-Grid LoRa Pet Tracker", "platform": "Instructables",
