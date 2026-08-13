@@ -27,7 +27,7 @@ Read [references/editorial-standard.md](references/editorial-standard.md) comple
    Treat a substantive project photo/video plus at least two structured build steps or multiple concrete process signals as direct built-result evidence; do not additionally require English completion words such as `finished` or `working`.
    On editorial/news platforms, require the article title or summary itself to identify a specific physical build and making action. Never use navigation, related-story, recipe, buying-guide, or footer text as physical evidence. A media report may pass this prefilter, but the final necessary-conditions gate still requires original-maker attribution and evidence.
 5. Keep China-mainland platforms, Thingiverse, Printables, MakerWorld, and pure model/material download pages out of the candidate pool.
-6. Run the four-stage pipeline. It writes raw audit data, Make Something Gate passes, and soft-mix-ranked physical+time+heat Top 15 candidates separately. Start with minimum targets of YouTube 5+, Reddit 4+, crowdfunding (Kickstarter + Indiegogo) 1+, and Hackaday 1+, plus four initial round-robin slots for all other platforms. Refill all remaining or unavailable slots from global score order; every source group, including crowdfunding and Hackaday, may exceed its minimum. Targets never bypass a gate:
+6. Run the four-stage pipeline. It writes raw audit data, Make Something Gate passes, and the complete physical+time+heat research pool separately. Do not cap this pool at 15 and do not apply platform targets yet:
 
    ```bash
    python3 scripts/maker_weekly.py run --output-dir output --as-of WEEK_END
@@ -50,9 +50,9 @@ Read [references/editorial-standard.md](references/editorial-standard.md) comple
    python3 scripts/strict_weekly.py snapshot --input output/researched-strict.json --output snapshots/YYYY-MM-DD.json
    ```
 
-10. Apply the five gates and three red lines in order. Stop reviewing a candidate at its first failed mandatory gate. Require at least three of four project-gate dimensions and one concrete excellence comparison.
-11. Write compact `decisions.json` for selected projects only. Follow the decision shape in [references/editorial-standard.md](references/editorial-standard.md). Every factual field needs an evidence URL.
-12. Merge, validate, sort, and render:
+10. Apply the five gates and three red lines in order to every project in the complete research pool. Stop reviewing a candidate at its first failed mandatory gate. Require at least three of four project-gate dimensions and one concrete excellence comparison, then score every all-gates-passed project on all six dimensions.
+11. Write compact `decisions.json` that covers the complete research pool: put every project that passed the five gates, three red lines, excellence check, and scoring in `items`, and every failure in `rejections` with its first failed stage, concrete reason, and primary evidence URL. Do not review only the anticipated final 15. Follow the decision shape in [references/editorial-standard.md](references/editorial-standard.md); the selector rejects incomplete coverage.
+12. Merge the complete strict-pass set, then apply the final source mix: YouTube 5+, Reddit 4+, crowdfunding (Kickstarter + Indiegogo) 1+, Hackaday 1+, and four initial round-robin slots for the other platforms. Refill missing or remaining slots by strict editorial score; every group may exceed its minimum. Validate, sort, and render:
 
    ```bash
    python3 scripts/strict_weekly.py select --input output/researched-strict.json --decisions output/decisions.json --output output/final.json
@@ -85,7 +85,7 @@ Platform coverage and item eligibility are separate. Keep `error`/`blocked` out 
 - Pace bundled social feeds, honor bounded `Retry-After`, then retry only failed feeds in one or two recovery rounds. Keep YouTube detail enrichment at low concurrency and Reddit at lower concurrency. Record recovery rounds and recovered feed counts. Never turn an unrecovered partial run into `ok`.
 - For YouTube, use the desktop-safe default pacing and two recovery rounds. After RSS recovery is exhausted, fall back only to the same channel's official `/videos` page; extract bounded recent video IDs, then require exact publication dates and visible metrics from official watch pages. Reuse watch-page observations within the run. Record `rss_successful_feeds`, `page_fallback_attempted`, and `page_fallback_succeeded`; describe mixed recovery as discovery-target success, not RSS success.
 - Keep Kickstarter enabled in the formal default. Kicktraq may discover official campaign URLs, but only the official Kickstarter widget may supply launch and heat metrics. Persist successful official-widget observations and reuse them only for the same issue when a later fetch is temporarily blocked, retaining the original capture time and cache provenance; use the official project `posts.atom` feed as a fallback for physical build/process evidence.
-- Preserve the exact stage order: platform fetch → raw audit → Make Something Gate → time gate → heat gate → cross-platform deduplication and global candidate scoring → soft source-mix candidate Top 15 → five gates and three red lines → final Top 15. Soft candidate slots never bypass a gate; missing slots refill by global score.
+- Preserve the exact stage order: platform fetch → raw audit → Make Something Gate → time gate → heat gate → complete cross-platform research pool → five gates → three red lines → excellence check → six-dimension scoring → final 5+/4+/1+/1+ source mix → final Top 15. Never apply source targets or a Top-15 cap before strict editorial review. Final source targets never bypass a gate; unavailable slots refill by strict editorial score.
 - Merge cross-platform duplicates and retain all primary evidence links.
 - Exclude mature-company official mass-market products, ads, product marketing, pure tutorials, replicas, kit assemblies, routine repairs, concepts, renders, food, and AI-only output.
 - Preserve raw discoveries and snapshots for audit. Do not rewrite observed metrics during editorial ranking. Never render raw discoveries through the final report renderer.

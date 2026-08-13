@@ -20,6 +20,7 @@ EXCELLENCE_DIRECTIONS = {"technical_engineering", "creative_play", "value_resona
 PROJECT_GATE_KEYS = {"multi_stage", "significant_investment", "real_challenge", "real_motivation"}
 NECESSARY_KEYS = {"small_team_led", "what_and_why", "built_or_substantive_progress"}
 RED_LINE_KEYS = {"original_creation", "actually_built", "not_mature_mass_product"}
+REJECTION_STAGES = {"category_gate", "project_gate", "necessary_conditions", "excellence", "red_line", "evidence_verification"}
 SCORE_KEYS = {
     "creation_investment", "process_visibility", "impact_resonance", "completion",
     "cross_platform_continuity", "diversity_breakout",
@@ -293,6 +294,65 @@ def validate_decision(decision: dict[str, Any], candidate: dict[str, Any], start
     return errors
 
 
+def final_mix_config(researched: dict[str, Any]) -> dict[str, Any] | None:
+    summary = researched.get("config_summary") or {}
+    mix = summary.get("final_mix", summary.get("candidate_mix"))
+    return mix if isinstance(mix, dict) and mix.get("enabled") is True else None
+
+
+def final_editorial_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        item["total_score"], item["scores"]["creation_investment"], item["scores"]["completion"],
+        len(item["excellence"]["benchmark_statement"]), len(item.get("evidence", [])),
+    )
+
+
+def final_mix_select(
+    eligible: list[dict[str, Any]], limit: int, mix: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Apply source minimum targets only after every editorial gate passes."""
+    ordered = sorted(eligible, key=final_editorial_sort_key, reverse=True)
+    if not mix:
+        return ordered[:limit], {"enabled": False, "targets": {}, "eligible": {}, "selected": {}, "shortfalls": {}}
+    targets = mix.get("initial_slots") if isinstance(mix.get("initial_slots"), dict) else {}
+    selected: list[dict[str, Any]] = []
+    for bucket in ("youtube", "reddit", "crowdfunding", "hackaday", "other"):
+        target = max(0, int(targets.get(bucket) or 0))
+        pool = [item for item in ordered if maker_weekly.candidate_mix_bucket(item) == bucket and item not in selected]
+        chosen = maker_weekly.round_robin_platforms(pool, target) if bucket == "other" else pool[:target]
+        for item in chosen:
+            item["final_mix_bucket"] = bucket
+            item["final_mix_slot"] = "minimum_target"
+        selected.extend(chosen)
+    for item in ordered:
+        if len(selected) >= limit:
+            break
+        if item in selected:
+            continue
+        item["final_mix_bucket"] = maker_weekly.candidate_mix_bucket(item)
+        item["final_mix_slot"] = "global_score_refill"
+        selected.append(item)
+    selected = selected[:limit]
+    eligible_counts = {
+        bucket: sum(maker_weekly.candidate_mix_bucket(item) == bucket for item in ordered)
+        for bucket in ("youtube", "reddit", "crowdfunding", "hackaday", "other")
+    }
+    selected_counts = {
+        bucket: sum(maker_weekly.candidate_mix_bucket(item) == bucket for item in selected)
+        for bucket in eligible_counts
+    }
+    shortfalls = {
+        bucket: {"target": int(targets.get(bucket) or 0), "eligible": eligible_counts[bucket], "selected": selected_counts[bucket]}
+        for bucket in eligible_counts
+        if selected_counts[bucket] < int(targets.get(bucket) or 0)
+    }
+    return selected, {
+        "enabled": True, "applied_after_strict_review": True,
+        "targets": {key: int(value) for key, value in targets.items()},
+        "eligible": eligible_counts, "selected": selected_counts, "shortfalls": shortfalls,
+    }
+
+
 def select_payload(researched: dict[str, Any], decisions: dict[str, Any]) -> dict[str, Any]:
     week = researched.get("week") or {}
     start = maker_weekly.parse_datetime(week.get("start"))
@@ -303,9 +363,10 @@ def select_payload(researched: dict[str, Any], decisions: dict[str, Any]) -> dic
     decision_items = decisions.get("items")
     if not isinstance(decision_items, list):
         raise StrictError("decisions.items must be an array")
-    if len(decision_items) > 15:
-        raise StrictError("final selection cannot exceed 15 projects")
-    selected, seen_ids, seen_urls, all_errors = [], set(), set(), []
+    rejection_items = decisions.get("rejections", [])
+    if not isinstance(rejection_items, list):
+        raise StrictError("decisions.rejections must be an array")
+    eligible, seen_ids, seen_urls, all_errors = [], set(), set(), []
     for index, decision in enumerate(decision_items, 1):
         candidate_id = decision.get("id") if isinstance(decision, dict) else None
         candidate = source.get(candidate_id)
@@ -326,21 +387,51 @@ def select_payload(researched: dict[str, Any], decisions: dict[str, Any]) -> dic
         merged = deepcopy(candidate)
         merged.update(deepcopy(decision))
         merged["total_score"] = sum(decision["scores"].values())
-        selected.append(merged)
+        eligible.append(merged)
         seen_ids.add(candidate_id)
         seen_urls.add(canonical)
+    rejected_ids: set[Any] = set()
+    for index, rejection in enumerate(rejection_items, 1):
+        if not isinstance(rejection, dict):
+            all_errors.append(f"rejection {index}: must be an object")
+            continue
+        candidate_id = rejection.get("id")
+        if candidate_id not in source:
+            all_errors.append(f"rejection {index}: unknown candidate id {candidate_id}")
+            continue
+        if candidate_id in seen_ids or candidate_id in rejected_ids:
+            all_errors.append(f"rejection {index}: duplicate reviewed candidate id {candidate_id}")
+            continue
+        if rejection.get("failed_stage") not in REJECTION_STAGES:
+            all_errors.append(f"rejection {candidate_id}: invalid failed_stage")
+        if not str(rejection.get("rejection_reason") or "").strip():
+            all_errors.append(f"rejection {candidate_id}: rejection_reason is required")
+        if not is_http_url(rejection.get("evidence_url")):
+            all_errors.append(f"rejection {candidate_id}: primary evidence_url is required")
+        rejected_ids.add(candidate_id)
+    missing_reviews = set(source) - seen_ids - rejected_ids
+    if missing_reviews:
+        all_errors.append(
+            "strict review is incomplete; add a passing decision or evidence-backed rejection for: "
+            + ", ".join(sorted(str(value) for value in missing_reviews))
+        )
     if all_errors:
         raise StrictError("\n".join(all_errors))
-    selected.sort(key=lambda item: (
-        item["total_score"], item["scores"]["creation_investment"], item["scores"]["completion"],
-        len(item["excellence"]["benchmark_statement"]), len(item.get("evidence", [])),
-    ), reverse=True)
+    limit = int((researched.get("config_summary") or {}).get("final_top", 15))
+    selected, mix_summary = final_mix_select(eligible, limit, final_mix_config(researched))
+    # Final display order remains pure editorial score order after the mix has
+    # determined membership.
+    selected.sort(key=final_editorial_sort_key, reverse=True)
     for rank, item in enumerate(selected, 1):
         item["rank"] = rank
     stats = dict(researched.get("issue_stats") or {})
     stats.update({
         "selected_projects": len(selected),
+        "strict_review_passed": len(eligible),
+        "strict_review_rejected": len(rejected_ids),
+        "strict_reviewed": len(eligible) + len(rejected_ids),
         "first_release_count": sum(item["entry_type"] == "first_release" for item in selected),
+        "final_mix": mix_summary,
     })
     return {
         "schema_version": 1, "selection_method": "maker-weekly-strict-v1", "week": week,
@@ -369,6 +460,20 @@ def validate_final(payload: dict[str, Any]) -> list[str]:
     stats = payload.get("issue_stats") or {}
     if stats.get("selected_projects") != len(items):
         errors.append("issue_stats.selected_projects does not match items")
+    mix = stats.get("final_mix")
+    if isinstance(mix, dict) and mix.get("enabled") is True:
+        if mix.get("applied_after_strict_review") is not True:
+            errors.append("final source mix must be applied after strict review")
+        targets = mix.get("targets") if isinstance(mix.get("targets"), dict) else {}
+        selected_counts = {
+            bucket: sum(maker_weekly.candidate_mix_bucket(item) == bucket for item in items)
+            for bucket in ("youtube", "reddit", "crowdfunding", "hackaday", "other")
+        }
+        for bucket, target in targets.items():
+            eligible = int((mix.get("eligible") or {}).get(bucket) or 0)
+            required = min(int(target), eligible)
+            if selected_counts.get(bucket, 0) < required:
+                errors.append(f"final mix failed available minimum target for {bucket}")
     return errors
 
 

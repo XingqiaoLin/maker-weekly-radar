@@ -639,9 +639,8 @@ def round_robin_platforms(items: list[dict[str, Any]], limit: int) -> list[dict[
 
 def rank_global_candidates(
     items: list[dict[str, Any]], as_of: datetime, limit: int, thresholds: Any = None,
-    candidate_mix: Any = None,
 ) -> list[dict[str, Any]]:
-    """Rank globally, optionally reserving source targets before global refill."""
+    """Globally order a research pool without applying final source targets."""
     unique = deduplicate(items)
     for item in unique:
         score, components = global_candidate_score(item, as_of, thresholds)
@@ -652,35 +651,7 @@ def rank_global_candidates(
         key=lambda item: (item.get("radar_score", 0.0), item.get("published_at") or "", item.get("title") or ""),
         reverse=True,
     )
-    selected: list[dict[str, Any]] = []
-    mix = candidate_mix if isinstance(candidate_mix, dict) and candidate_mix.get("enabled") is True else None
-    if mix:
-        quotas = mix.get("initial_slots") if isinstance(mix.get("initial_slots"), dict) else {}
-        for bucket in ("youtube", "reddit", "crowdfunding", "hackaday", "other"):
-            quota = max(0, int(quotas.get(bucket) or 0))
-            pool = [item for item in ordered if candidate_mix_bucket(item) == bucket and item not in selected]
-            chosen = round_robin_platforms(pool, quota) if bucket == "other" else pool[:quota]
-            for item in chosen:
-                item["candidate_mix_bucket"] = bucket
-                item["candidate_mix_slot"] = "initial_source_target"
-            selected.extend(chosen)
-        # Targets are floors when enough eligible projects exist, not caps. Any
-        # unfilled or remaining slots return to the global quality order, which
-        # may add more YouTube or Reddit projects beyond their initial targets.
-        for item in ordered:
-            if len(selected) >= limit:
-                break
-            if item in selected:
-                continue
-            item["candidate_mix_bucket"] = candidate_mix_bucket(item)
-            item["candidate_mix_slot"] = "global_score_refill"
-            selected.append(item)
-    else:
-        selected = ordered[:limit]
-    selected.sort(
-        key=lambda item: (item.get("radar_score", 0.0), item.get("published_at") or "", item.get("title") or ""),
-        reverse=True,
-    )
+    selected = ordered[:limit]
     for index, item in enumerate(selected[:limit], 1):
         item["candidate_rank"] = index
         item.pop("_raw_score", None)
@@ -2767,18 +2738,20 @@ def validate_config(config: dict[str, Any]) -> None:
     final_top = int(config.get("final_top", 15))
     if not 1 <= final_top <= 100:
         raise ConfigError("final_top must be between 1 and 100")
-    candidate_mix = config.get("candidate_mix")
-    if candidate_mix is not None:
-        if not isinstance(candidate_mix, dict) or not isinstance(candidate_mix.get("enabled"), bool):
-            raise ConfigError("candidate_mix must be an object with boolean enabled")
-        quotas = candidate_mix.get("initial_slots")
+    if config.get("final_mix") is not None and config.get("candidate_mix") is not None:
+        raise ConfigError("use final_mix only; candidate_mix is a legacy alias")
+    final_mix = config.get("final_mix", config.get("candidate_mix"))
+    if final_mix is not None:
+        if not isinstance(final_mix, dict) or not isinstance(final_mix.get("enabled"), bool):
+            raise ConfigError("final_mix must be an object with boolean enabled")
+        quotas = final_mix.get("initial_slots")
         allowed_buckets = {"youtube", "reddit", "crowdfunding", "hackaday", "other"}
         if not isinstance(quotas, dict) or set(quotas) != allowed_buckets:
-            raise ConfigError("candidate_mix.initial_slots must define youtube, reddit, crowdfunding, hackaday, and other")
+            raise ConfigError("final_mix.initial_slots must define youtube, reddit, crowdfunding, hackaday, and other")
         if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in quotas.values()):
-            raise ConfigError("candidate_mix initial slots must be non-negative integers")
+            raise ConfigError("final_mix initial slots must be non-negative integers")
         if sum(quotas.values()) > final_top:
-            raise ConfigError("candidate_mix initial slots cannot exceed final_top")
+            raise ConfigError("final_mix initial slots cannot exceed final_top")
     seen = set()
     for source in config["sources"]:
         if not isinstance(source, dict) or not source.get("id"):
@@ -2948,7 +2921,7 @@ def collect_raw_envelope(config_path: Path, as_of: datetime, source_ids: set[str
                 raise ConfigError(f"raw_discovery_limit for {source['id']} must be at least 1")
             # This is only a bounded raw-fetch budget, not a platform quota.
             # The Make Something Gate, time gate, and heat gate still run before
-            # global candidate scoring and the final candidate Top 15.
+            # the complete strict-review research pool.
             raw_items = sorted(
                 raw_items,
                 key=lambda item: (item.get("_raw_score", 0.0), item.get("published_at") or ""),
@@ -2979,7 +2952,7 @@ def collect_raw_envelope(config_path: Path, as_of: datetime, source_ids: set[str
             "strict_current_week_only": bool(config.get("strict_current_week_only", True)),
             "heat_observation_policy": "execution_time",
             "candidate_ranking": "global-radar-score-v1",
-            "candidate_mix": config.get("candidate_mix") or {},
+            "final_mix": config.get("final_mix", config.get("candidate_mix")) or {},
             "final_top": final_top,
             "keywords": keywords,
             "heat_thresholds": context["heat_thresholds"],
@@ -3176,10 +3149,9 @@ def evaluate_heat_gate(item: dict[str, Any], as_of: datetime, thresholds: Any = 
 
 
 def editorial_candidates_envelope(payload: dict[str, Any], as_of: datetime) -> dict[str, Any]:
-    """Apply mandatory gates, deduplicate globally, and rank the best 15 candidates."""
+    """Apply the three collection gates and retain the full strict-review pool."""
     result = deepcopy(payload)
     start = parse_datetime(result.get("window_start")) or as_of
-    limit = int((result.get("config_summary") or {}).get("final_top", 15))
     thresholds = (result.get("config_summary") or {}).get("heat_thresholds")
     coverage_by_source = {
         str(status.get("source_id") or ""): str(status.get("status") or "error")
@@ -3199,11 +3171,12 @@ def editorial_candidates_envelope(payload: dict[str, Any], as_of: datetime) -> d
         item["heat_gate"] = evaluate_heat_gate(item, as_of, thresholds)
         if item.get("physical_gate", {}).get("status") == "pass" and item["time_gate"]["status"] == "pass" and item["heat_gate"]["status"] == "pass":
             passed.append(item)
-    candidate_mix = (result.get("config_summary") or {}).get("candidate_mix")
-    mix_enabled = isinstance(candidate_mix, dict) and candidate_mix.get("enabled") is True
-    result["items"] = rank_global_candidates(passed, as_of, limit, thresholds, candidate_mix)
-    result["stage"] = "editorial_candidates"
-    result["selection_method"] = "physical-time-heat-soft-mix-top15-v1" if mix_enabled else "physical-time-heat-global-top15-v1"
+    # Do not apply final source targets here. Every physical+time+heat pass must
+    # remain available for five-gate, three-red-line, excellence, and scoring
+    # review. The 5+/4+/1+/1+ mix belongs only to strict final selection.
+    result["items"] = rank_global_candidates(passed, as_of, len(passed), thresholds)
+    result["stage"] = "editorial_research_pool"
+    result["selection_method"] = "physical-time-heat-full-research-pool-v1"
     time_passed = sum(publication_is_in_window(item, start, as_of) for item in payload.get("items") or [])
     heat_passed = sum(
         publication_is_in_window(item, start, as_of) and evaluate_heat_gate(item, as_of, thresholds).get("status") == "pass"
@@ -3212,6 +3185,7 @@ def editorial_candidates_envelope(payload: dict[str, Any], as_of: datetime) -> d
     result["stage_counts"] = {
         **(payload.get("stage_counts") or {}), "time_gate_passed": time_passed,
         "heat_gate_passed": heat_passed, "editorial_candidates": len(result["items"]),
+        "editorial_research_pool": len(result["items"]),
     }
     for status in result.get("source_status") or []:
         source_items = [item for item in payload.get("items") or [] if item.get("source_id") == status.get("source_id")]
@@ -3401,7 +3375,7 @@ def build_parser() -> argparse.ArgumentParser:
     render = sub.add_parser("render", help="render ranked JSON as Markdown")
     render.add_argument("--input", required=True, type=Path)
     render.add_argument("--output", required=True, type=Path)
-    run = sub.add_parser("run", help="write raw, physical, editorial-candidate, and audit artifacts")
+    run = sub.add_parser("run", help="write raw, physical, complete research-pool, and audit artifacts")
     run.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="config JSON; defaults to the bundled zero-credential profile")
     run.add_argument("--output-dir", required=True, type=Path)
     run.add_argument("--as-of")
@@ -3453,7 +3427,7 @@ def main(argv: list[str] | None = None) -> int:
             write_json(args.output_dir / "physical-candidates.json", physical)
             write_json(args.output_dir / "researched.json", researched)
             write_text(args.output_dir / "raw-discoveries-audit.md", render_markdown(audit))
-            print(f"wrote raw discoveries, physical candidates, editorial candidates, and non-publishable audit to {args.output_dir}")
+            print(f"wrote raw discoveries, physical candidates, complete research pool, and non-publishable audit to {args.output_dir}")
         return 0
     except (ConfigError, json.JSONDecodeError, OSError, RuntimeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

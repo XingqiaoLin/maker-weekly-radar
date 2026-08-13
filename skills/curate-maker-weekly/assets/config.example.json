@@ -4,7 +4,7 @@
   "discovery_per_source": 150,
   "strict_current_week_only": true,
   "final_top": 15,
-  "candidate_mix": {
+  "final_mix": {
     "enabled": true,
     "initial_slots": {
       "youtube": 5,

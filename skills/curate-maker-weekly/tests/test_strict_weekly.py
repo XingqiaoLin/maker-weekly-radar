@@ -10,6 +10,39 @@ import strict_weekly  # noqa: E402
 
 
 class StrictWeeklyTests(unittest.TestCase):
+    def strict_candidate_and_decision(self, index, platform, score):
+        candidate_id = f"project-{index}"
+        url = f"https://example.test/{platform.lower().replace(' ', '-')}/{index}"
+        candidate = {
+            "id": candidate_id, "platform": platform, "title": f"Physical maker project {index}",
+            "url": url, "canonical_url": url, "published_at": "2026-08-05T10:00:00Z",
+            "evidence": [url], "time_gate": {"status": "pass", "entry_type": "first_release"},
+            "heat_gate": {"status": "pass", "observed": "verified platform threshold", "threshold": "threshold", "captured_at": "2026-08-12T00:00:00Z", "evidence_url": url},
+            "physical_gate": {"status": "pass", "checks": {"creator_made_physical": True, "physical_is_core": True, "built_result_visible": True, "human_process_visible": True}, "evidence": [{"type": "video", "url": url}]},
+        }
+        evidence = "The original creator documents design, fabrication, assembly, testing, and iteration."
+        decision = {
+            "id": candidate_id, "category": "极客硬核", "entry_type": "first_release", "first_seen_date": "2026-08-05",
+            "heat_gate": candidate["heat_gate"],
+            "creator": {"name": f"Maker {index}", "background": "Independent maker documented on the original page.", "evidence_urls": [url]},
+            "project_description": "A completed physical machine with a documented real-world purpose.",
+            "build_path": "CAD, fabrication, electronics assembly, testing, and iterative revisions.",
+            "category_gate": {"passed": True, "evidence": evidence, "evidence_url": url},
+            "project_gate_evidence": {
+                key: {"passed": True, "evidence": evidence, "evidence_url": url, "evidence_locator": f"Build section {key}"}
+                for key in strict_weekly.PROJECT_GATE_KEYS
+            },
+            "necessary_conditions": {key: {"passed": True, "evidence": evidence} for key in strict_weekly.NECESSARY_KEYS},
+            "excellence": {"direction": "technical_engineering", "benchmark_statement": "Comparable builds use kits, but this one documents a self-designed physical mechanism.", "evidence_url": url},
+            "red_lines": {key: {"passed": True, "evidence": evidence} for key in strict_weekly.RED_LINE_KEYS},
+            "scores": {
+                "creation_investment": score, "process_visibility": score, "impact_resonance": score,
+                "completion": score, "cross_platform_continuity": score, "diversity_breakout": score,
+            },
+            "selection_reason": "It passes every mandatory gate with original evidence and a concrete physical result.",
+        }
+        return candidate, decision
+
     def test_duplicate_platform_status_failure_cannot_be_hidden_by_success(self):
         statuses = [
             {"platform": "YouTube", "status": "error"},
@@ -173,6 +206,84 @@ class StrictWeeklyTests(unittest.TestCase):
         self.assertEqual(final["issue_stats"]["first_release_count"], 1)
         self.assertEqual(strict_weekly.validate_final(final), [])
         self.assertIn("Open hardware arm", strict_weekly.render(final))
+
+    def test_final_source_minimums_apply_after_all_strict_decisions(self):
+        specs = [("YouTube", 7), ("Reddit", 5), ("Kickstarter", 2), ("Hackaday", 2), ("Instructables", 4)]
+        candidates, decisions = [], []
+        index = 0
+        for platform, count in specs:
+            for _ in range(count):
+                # Give other-platform items the highest scores so this test
+                # proves source targets are applied after, not instead of,
+                # strict editorial validation and scoring.
+                score = 5 if platform == "Instructables" else 4
+                candidate, decision = self.strict_candidate_and_decision(index, platform, score)
+                candidates.append(candidate); decisions.append(decision); index += 1
+        researched = {
+            "week": {"start": "2026-08-03T00:00:00Z", "end": "2026-08-09T23:59:59Z", "timezone": "UTC"},
+            "config_summary": {
+                "final_top": 15,
+                "final_mix": {"enabled": True, "initial_slots": {
+                    "youtube": 5, "reddit": 4, "crowdfunding": 1, "hackaday": 1, "other": 4,
+                }},
+            },
+            "issue_stats": {"platforms_searched": 5, "initial_candidates": len(candidates)},
+            "items": candidates,
+        }
+        final = strict_weekly.select_payload(researched, {"items": decisions})
+        counts = {bucket: sum(strict_weekly.maker_weekly.candidate_mix_bucket(item) == bucket for item in final["items"])
+                  for bucket in ("youtube", "reddit", "crowdfunding", "hackaday", "other")}
+        self.assertEqual(len(final["items"]), 15)
+        self.assertGreaterEqual(counts["youtube"], 5)
+        self.assertGreaterEqual(counts["reddit"], 4)
+        self.assertGreaterEqual(counts["crowdfunding"], 1)
+        self.assertGreaterEqual(counts["hackaday"], 1)
+        self.assertEqual(final["issue_stats"]["strict_review_passed"], 20)
+        self.assertTrue(final["issue_stats"]["final_mix"]["applied_after_strict_review"])
+        self.assertEqual(strict_weekly.validate_final(final), [])
+
+    def test_final_source_shortfall_is_recorded_and_refilled(self):
+        specs = [("YouTube", 8), ("Reddit", 6), ("Instructables", 4)]
+        candidates, decisions = [], []
+        index = 0
+        for platform, count in specs:
+            for _ in range(count):
+                candidate, decision = self.strict_candidate_and_decision(index, platform, 4)
+                candidates.append(candidate); decisions.append(decision); index += 1
+        researched = {
+            "week": {"start": "2026-08-03T00:00:00Z", "end": "2026-08-09T23:59:59Z", "timezone": "UTC"},
+            "config_summary": {"final_top": 15, "final_mix": {"enabled": True, "initial_slots": {
+                "youtube": 5, "reddit": 4, "crowdfunding": 1, "hackaday": 1, "other": 4,
+            }}},
+            "issue_stats": {}, "items": candidates,
+        }
+        final = strict_weekly.select_payload(researched, {"items": decisions})
+        self.assertEqual(len(final["items"]), 15)
+        shortfalls = final["issue_stats"]["final_mix"]["shortfalls"]
+        self.assertEqual(shortfalls["crowdfunding"]["eligible"], 0)
+        self.assertEqual(shortfalls["hackaday"]["eligible"], 0)
+        self.assertEqual(strict_weekly.validate_final(final), [])
+
+    def test_final_selection_rejects_incomplete_strict_review(self):
+        first_candidate, first_decision = self.strict_candidate_and_decision(1, "YouTube", 4)
+        second_candidate, _ = self.strict_candidate_and_decision(2, "Reddit", 4)
+        researched = {
+            "week": {"start": "2026-08-03T00:00:00Z", "end": "2026-08-09T23:59:59Z", "timezone": "UTC"},
+            "config_summary": {"final_top": 15}, "issue_stats": {},
+            "items": [first_candidate, second_candidate],
+        }
+        with self.assertRaisesRegex(strict_weekly.StrictError, "strict review is incomplete"):
+            strict_weekly.select_payload(researched, {"items": [first_decision], "rejections": []})
+        final = strict_weekly.select_payload(researched, {
+            "items": [first_decision],
+            "rejections": [{
+                "id": second_candidate["id"], "failed_stage": "project_gate",
+                "rejection_reason": "Only one project-gate dimension had direct evidence.",
+                "evidence_url": second_candidate["url"],
+            }],
+        })
+        self.assertEqual(final["issue_stats"]["strict_reviewed"], 2)
+        self.assertEqual(final["issue_stats"]["strict_review_rejected"], 1)
 
     def test_raw_or_failed_gate_items_cannot_enter_final_report(self):
         payload = {
