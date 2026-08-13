@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-USER_AGENT = "maker-weekly-radar/0.15"
+USER_AGENT = "maker-weekly-radar/0.16"
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "assets" / "config.example.json"
 HEAT_THRESHOLDS = {
     "kickstarter": {"usd_pledged": 5_000, "backers": 50},
@@ -2613,8 +2613,20 @@ def editorial_candidates_envelope(payload: dict[str, Any], as_of: datetime) -> d
     start = parse_datetime(result.get("window_start")) or as_of
     limit = int((result.get("config_summary") or {}).get("top_per_source", 5))
     thresholds = (result.get("config_summary") or {}).get("heat_thresholds")
+    coverage_by_source = {
+        str(status.get("source_id") or ""): str(status.get("status") or "error")
+        for status in result.get("source_status") or []
+        if isinstance(status, dict)
+    }
     passed: list[dict[str, Any]] = []
     for item in result.get("items") or []:
+        coverage_status = coverage_by_source.get(str(item.get("source_id") or ""), "unknown")
+        item["source_coverage"] = {
+            "status": coverage_status,
+            "complete": coverage_status in {"ok", "empty"},
+            "scope": "complete_platform_coverage" if coverage_status in {"ok", "empty"} else "partial_platform_coverage",
+            "candidate_policy": "individually_verified_items_remain_eligible",
+        }
         item["time_gate"] = {"status": "pass" if publication_is_in_window(item, start, as_of) else "fail"}
         item["heat_gate"] = evaluate_heat_gate(item, as_of, thresholds)
         if item.get("physical_gate", {}).get("status") == "pass" and item["time_gate"]["status"] == "pass" and item["heat_gate"]["status"] == "pass":

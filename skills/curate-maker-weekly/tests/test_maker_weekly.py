@@ -404,6 +404,48 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertEqual(status["coverage"]["detail_coverage"]["successful_items"], 1)
         self.assertEqual(status["coverage"]["detail_coverage"]["error_items"], 1)
 
+    def test_partial_platform_coverage_does_not_reject_individually_verified_youtube_item(self):
+        captured = "2026-08-12T00:00:00Z"
+        item = {
+            "id": "youtube-project", "source_id": "youtube-rss", "platform": "YouTube",
+            "title": "I built a working robot", "url": "https://youtube.com/watch?v=project1",
+            "published_at": "2026-08-07T00:00:00Z", "metrics_captured_at": captured,
+            "metrics": {"views": 50000}, "metric_verification": {"status": "ok"},
+            "physical_gate": {"status": "pass"}, "_raw_score": 50000,
+        }
+        payload = {
+            "window_start": "2026-08-03T00:00:00Z",
+            "config_summary": {"top_per_source": 5, "heat_thresholds": maker_weekly.resolve_heat_thresholds()},
+            "source_status": [{"source_id": "youtube-rss", "platform": "YouTube", "status": "error"}],
+            "stage_counts": {}, "items": [item],
+        }
+        result = maker_weekly.editorial_candidates_envelope(
+            payload, datetime(2026, 8, 9, 23, 59, 59, tzinfo=timezone.utc),
+        )
+        self.assertEqual([candidate["id"] for candidate in result["items"]], ["youtube-project"])
+        coverage = result["items"][0]["source_coverage"]
+        self.assertFalse(coverage["complete"])
+        self.assertEqual(coverage["scope"], "partial_platform_coverage")
+        self.assertEqual(result["source_status"][0]["status"], "error")
+
+    def test_partial_platform_coverage_does_not_rescue_unverified_item(self):
+        item = {
+            "id": "youtube-unverified", "source_id": "youtube-rss", "platform": "YouTube",
+            "title": "Robot", "url": "https://youtube.com/watch?v=project2",
+            "published_at": "2026-08-07T00:00:00Z", "metrics_captured_at": "2026-08-12T00:00:00Z",
+            "metrics": {}, "metric_verification": {"status": "error"},
+            "physical_gate": {"status": "pass"}, "_raw_score": 0,
+        }
+        payload = {
+            "window_start": "2026-08-03T00:00:00Z", "config_summary": {"top_per_source": 5},
+            "source_status": [{"source_id": "youtube-rss", "platform": "YouTube", "status": "error"}],
+            "items": [item],
+        }
+        result = maker_weekly.editorial_candidates_envelope(
+            payload, datetime(2026, 8, 9, 23, 59, 59, tzinfo=timezone.utc),
+        )
+        self.assertEqual(result["items"], [])
+
     def test_request_bytes_retries_5xx_but_not_404(self):
         server_error = urllib.error.HTTPError("https://youtube.test/feed", 500, "server error", {}, None)
         with mock.patch.object(maker_weekly.urllib.request, "urlopen", side_effect=[server_error, server_error, server_error]) as urlopen, \

@@ -180,7 +180,11 @@ def prepare_payload(payload: dict[str, Any], start: datetime, end: datetime) -> 
         "physical_prefilter_passed": int(stage_counts.get("physical_prefilter_passed", len(result.get("items", [])))),
         "heat_gate_passed": int(stage_counts.get("heat_gate_passed", len(result.get("items", [])))),
         "initial_candidates": int(stage_counts.get("editorial_candidates", len(result.get("items", [])))),
-        "coverage_warning": f"本期平台覆盖不完整：{'/'.join(missing_social)} 未检索" if missing_social else "",
+        "coverage_warning": (
+            f"本期平台覆盖不完整：{'/'.join(missing_social)} 未完成完整检索；"
+            "其中已独立通过实体、时间和热度核验的项目仍可参与严格评审"
+            if missing_social else ""
+        ),
     }
     result["selection_method"] = "strict-research-pending"
     return result

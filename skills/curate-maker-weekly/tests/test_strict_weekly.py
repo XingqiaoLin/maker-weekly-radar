@@ -26,6 +26,28 @@ class StrictWeeklyTests(unittest.TestCase):
         self.assertEqual(window["week_end"], "2026-08-09")
         self.assertNotIn("previous_snapshot_date", window)
 
+    def test_partial_social_coverage_warning_does_not_remove_existing_candidates(self):
+        payload = {
+            "source_status": [
+                {"source_id": "youtube-rss", "platform": "YouTube", "status": "error"},
+                {"source_id": "reddit-rss", "platform": "Reddit", "status": "ok"},
+            ],
+            "stage_counts": {"editorial_candidates": 1},
+            "items": [{
+                "id": "youtube-project", "platform": "YouTube", "title": "Built robot",
+                "url": "https://youtube.com/watch?v=project1", "published_at": "2026-08-07T00:00:00Z",
+                "metrics": {"views": 50000}, "metrics_captured_at": "2026-08-12T00:00:00Z",
+                "physical_gate": {"status": "pass"},
+            }],
+        }
+        start, end = strict_weekly.week_bounds("2026-08-03", "2026-08-09")
+        prepared = strict_weekly.prepare_payload(payload, start, end)
+        self.assertEqual(len(prepared["items"]), 1)
+        self.assertEqual(prepared["items"][0]["heat_gate"]["status"], "pass")
+        self.assertEqual(prepared["issue_stats"]["platforms_searched"], 1)
+        self.assertIn("未完成完整检索", prepared["issue_stats"]["coverage_warning"])
+        self.assertIn("仍可参与严格评审", prepared["issue_stats"]["coverage_warning"])
+
     def test_heat_gates_are_hard_thresholds(self):
         github = strict_weekly.heat_gate({"platform": "GitHub", "metrics": {"stars": 999}, "url": "https://github.com/x/y"})
         kickstarter_low = strict_weekly.heat_gate({"platform": "Kickstarter", "metrics": {"backers": 49}, "url": "https://kickstarter.com/x"})

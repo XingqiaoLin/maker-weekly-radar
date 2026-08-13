@@ -61,6 +61,8 @@ Read [references/editorial-standard.md](references/editorial-standard.md) comple
 
 13. Return only the final selected projects, up to 15, plus the required issue statistics. If none pass, publish zero and explain only the aggregate shortfall; do not add rejected projects to the final list.
 
+Platform coverage and item eligibility are separate. Keep `error`/`blocked` out of the completed-platform count and show the coverage warning, but do not reject a discovered item solely because another feed or item from the same platform failed. A YouTube item from a successful feed may proceed when its own original publication, physical evidence, visible metrics, and all later gates pass. A Reddit item may proceed through exact heat or the labeled official weekly-RSS proxy. Mark such items `source_coverage.scope=partial_platform_coverage` so the final report cannot imply complete platform search.
+
 ## Completion contract
 
 - Treat `researched.json` and `researched-strict.json` as intermediate candidate artifacts, never as completion of a full weekly issue request.
