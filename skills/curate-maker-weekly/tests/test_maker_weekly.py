@@ -24,6 +24,62 @@ class MakerWeeklyTests(unittest.TestCase):
         second = maker_weekly.canonical_url("https://example.com/project?id=7")
         self.assertEqual(first, second)
 
+    def test_cli_defaults_to_bundled_zero_credential_config(self):
+        args = maker_weekly.build_parser().parse_args(["run", "--output-dir", "output"])
+        self.assertEqual(args.config, maker_weekly.DEFAULT_CONFIG_PATH)
+        self.assertTrue(args.config.is_file())
+
+    def test_github_reuses_existing_gh_cli_login_without_configuration(self):
+        source = {
+            "id": "github", "type": "github", "platform": "GitHub",
+            "queries": ["topic:open-hardware"], "required_terms": ["hardware"],
+            "date_qualifier": "created",
+        }
+        context = {
+            "timeout": 10, "limit": 5,
+            "since": datetime(2026, 8, 3, tzinfo=timezone.utc),
+            "as_of": datetime(2026, 8, 9, 23, 59, 59, tzinfo=timezone.utc),
+        }
+        response = {"items": [{
+            "id": 1, "full_name": "maker/new-hardware", "html_url": "https://github.com/maker/new-hardware",
+            "description": "Open hardware robot", "owner": {"login": "maker"},
+            "created_at": "2026-08-05T00:00:00Z", "updated_at": "2026-08-06T00:00:00Z",
+            "pushed_at": "2026-08-06T00:00:00Z", "default_branch": "main",
+            "stargazers_count": 1200, "forks_count": 10, "subscribers_count": 5,
+            "open_issues_count": 1, "topics": ["open-hardware"],
+        }]}
+        completed = maker_weekly.subprocess.CompletedProcess(["gh", "auth", "token"], 0, stdout="local-token\n", stderr="")
+        with mock.patch.dict(maker_weekly.os.environ, {}, clear=True), \
+                mock.patch.object(maker_weekly.shutil, "which", return_value="/usr/bin/gh"), \
+                mock.patch.object(maker_weekly.subprocess, "run", return_value=completed), \
+                mock.patch.object(maker_weekly, "request_json", return_value=response) as request:
+            items = maker_weekly.collect_github(source, context)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(request.call_args.kwargs["headers"]["Authorization"], "Bearer local-token")
+
+    def test_github_remains_anonymous_when_no_existing_login_exists(self):
+        with mock.patch.dict(maker_weekly.os.environ, {}, clear=True), \
+                mock.patch.object(maker_weekly.shutil, "which", return_value=None):
+            self.assertIsNone(maker_weekly.discover_github_token({"id": "github"}))
+
+    def test_raw_discovery_budget_caps_each_source_before_physical_fetches(self):
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            discoveries = [
+                {"title": f"Project {index}", "url": f"https://example.test/{index}", "source_score": (index + 1) * 10}
+                for index in range(5)
+            ]
+            (root / "items.json").write_text(json.dumps(discoveries), encoding="utf-8")
+            config = {
+                "discovery_per_source": 2,
+                "sources": [{"id": "manual", "type": "manual", "platform": "Example", "path": "items.json"}],
+            }
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            payload = maker_weekly.collect_raw_envelope(config_path, datetime(2026, 8, 9, tzinfo=timezone.utc))
+        self.assertEqual(len(payload["items"]), 2)
+        self.assertEqual([item["title"] for item in payload["items"]], ["Project 4", "Project 3"])
+
     def test_physical_gate_failures_do_not_occupy_platform_top_five(self):
         with tempfile.TemporaryDirectory() as raw_dir:
             root = Path(raw_dir)
@@ -103,6 +159,16 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertEqual([item["title"] for item in items], ["maker/printable-arm"])
         self.assertIn("created%3A2026-08-05..2026-08-12", request.call_args.args[0])
 
+    def test_github_readme_connection_failure_does_not_multiply_timeouts(self):
+        item = {
+            "platform": "GitHub", "url": "https://github.com/maker/robot",
+            "provider_data": {"default_branch": "main"},
+        }
+        with mock.patch.object(maker_weekly, "request_bytes", side_effect=RuntimeError("TLS connection failed")) as request:
+            with self.assertRaises(RuntimeError):
+                maker_weekly.github_readme_page(item, 10)
+        self.assertEqual(request.call_count, 1)
+
     def test_publication_window_rejects_old_project_updated_this_week(self):
         old = {"published_at": "2018-06-29T23:57:16Z", "metrics": {"pushed_at": "2026-08-06T15:43:16Z"}}
         new = {"published_at": "2026-08-06T12:00:00Z"}
@@ -112,14 +178,41 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertTrue(maker_weekly.publication_is_in_window(new, since, as_of))
 
     def test_verified_social_heat_gates(self):
-        youtube_low = {"platform": "YouTube", "metrics": {"views": 199999, "channel_subscribers": 49999}, "metric_verification": {"status": "ok"}}
-        youtube_channel = {"platform": "YouTube", "metrics": {"views": 10, "channel_subscribers": 50000}, "metric_verification": {"status": "ok"}}
-        reddit_low = {"platform": "Reddit", "metrics": {"score": 4900, "comments": 99}, "metric_verification": {"status": "ok"}}
-        reddit_pass = {"platform": "Reddit", "metrics": {"score": 4900, "comments": 100}, "metric_verification": {"status": "ok"}}
+        youtube_low = {"platform": "YouTube", "metrics": {"views": 24999, "channel_subscribers": 9999}, "metric_verification": {"status": "ok"}}
+        youtube_channel = {"platform": "YouTube", "metrics": {"views": 10, "channel_subscribers": 10000}, "metric_verification": {"status": "ok"}}
+        reddit_low = {"platform": "Reddit", "metrics": {"score": 400, "comments": 99}, "metric_verification": {"status": "ok"}}
+        reddit_pass = {"platform": "Reddit", "metrics": {"score": 400, "comments": 100}, "metric_verification": {"status": "ok"}}
         self.assertFalse(maker_weekly.verified_platform_heat_passes(youtube_low))
         self.assertTrue(maker_weekly.verified_platform_heat_passes(youtube_channel))
         self.assertFalse(maker_weekly.verified_platform_heat_passes(reddit_low))
         self.assertTrue(maker_weekly.verified_platform_heat_passes(reddit_pass))
+
+    def test_expanded_heat_profile_keeps_exact_verified_boundaries(self):
+        captured = "2026-08-12T00:00:00Z"
+        as_of = datetime(2026, 8, 9, 23, 59, 59, tzinfo=timezone.utc)
+        cases = [
+            ({"platform": "Kickstarter", "metrics": {"backers": 49}, "metrics_captured_at": captured}, "fail"),
+            ({"platform": "Kickstarter", "metrics": {"backers": 50}, "metrics_captured_at": captured}, "pass"),
+            ({"platform": "YouTube", "metrics": {"views": 24999}, "metrics_captured_at": captured}, "fail"),
+            ({"platform": "YouTube", "metrics": {"views": 25000}, "metrics_captured_at": captured}, "pass"),
+            ({"platform": "Reddit", "metrics": {"score": 400, "comments": 99}, "metrics_captured_at": captured}, "fail"),
+            ({"platform": "Reddit", "metrics": {"score": 400, "comments": 100}, "metrics_captured_at": captured}, "pass"),
+            ({"platform": "Indiegogo", "metrics": {"backers": 100}, "metrics_captured_at": captured}, "fail"),
+        ]
+        for item, expected in cases:
+            with self.subTest(item=item):
+                self.assertEqual(maker_weekly.evaluate_heat_gate(item, as_of)["status"], expected)
+
+    def test_heat_thresholds_are_configurable_without_changing_evidence_rules(self):
+        thresholds = maker_weekly.resolve_heat_thresholds({"reddit": {"score_plus_comments": 1500}})
+        item = {
+            "platform": "Reddit", "metrics": {"score": 1000, "comments": 200},
+            "metrics_captured_at": "2026-08-12T00:00:00Z",
+        }
+        gate = maker_weekly.evaluate_heat_gate(item, datetime(2026, 8, 9, tzinfo=timezone.utc), thresholds)
+        self.assertEqual(gate["status"], "fail")
+        with self.assertRaises(maker_weekly.ConfigError):
+            maker_weekly.resolve_heat_thresholds({"reddit": {"score_plus_comments": 0}})
 
     def test_reddit_rss_excludes_question_posts_before_enrichment(self):
         feed = b"""<feed xmlns='http://www.w3.org/2005/Atom'>
@@ -187,8 +280,8 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertEqual(item["metrics"]["views"], 15394)
         self.assertEqual(item["metrics"]["channel_subscribers"], 701000)
         self.assertEqual(item["metric_verification"]["status"], "ok")
-        self.assertEqual(item["metric_verification"]["ranking_basis"], "views/200000 + channel_subscribers/50000")
-        self.assertAlmostEqual(item["_raw_score"], 15394 / 200000 + 701000 / 50000)
+        self.assertEqual(item["metric_verification"]["ranking_basis"], "views/25000 + channel_subscribers/10000")
+        self.assertAlmostEqual(item["_raw_score"], 15394 / 25000 + 701000 / 10000)
 
     def test_reddit_old_enrichment_reads_score_and_comments(self):
         page = b'''<html><div class=" thing link" id="thing_t3_post123" data-comments-count="41" data-score="24" data-type="link"></div></html>'''
@@ -307,6 +400,7 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertEqual(items[0]["metrics"]["backers"], 250)
         self.assertEqual(items[0]["metrics"]["usd_pledged"], 30000)
         self.assertEqual(items[0]["published_at"], "2026-08-07T12:00:00Z")
+        self.assertEqual(items[0]["physical_page"]["source_url"], "https://example.test/projects/maker/robot-arm")
 
     def test_web_html_reports_access_challenge(self):
         source = {

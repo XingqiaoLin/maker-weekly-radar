@@ -18,9 +18,11 @@ class StrictWeeklyTests(unittest.TestCase):
 
     def test_heat_gates_are_hard_thresholds(self):
         github = strict_weekly.heat_gate({"platform": "GitHub", "metrics": {"stars": 999}, "url": "https://github.com/x/y"})
-        kickstarter = strict_weekly.heat_gate({"platform": "Kickstarter", "metrics": {"backers": 200}, "url": "https://kickstarter.com/x"})
+        kickstarter_low = strict_weekly.heat_gate({"platform": "Kickstarter", "metrics": {"backers": 49}, "url": "https://kickstarter.com/x"})
+        kickstarter = strict_weekly.heat_gate({"platform": "Kickstarter", "metrics": {"backers": 50}, "url": "https://kickstarter.com/x"})
         youtube_rss = strict_weekly.heat_gate({"platform": "YouTube", "metrics": {"feed_host": "youtube.com"}, "url": "https://youtube.com/x"})
         self.assertEqual(github["status"], "fail")
+        self.assertEqual(kickstarter_low["status"], "fail")
         self.assertEqual(kickstarter["status"], "pass")
         self.assertEqual(youtube_rss["status"], "unknown")
 
@@ -80,7 +82,12 @@ class StrictWeeklyTests(unittest.TestCase):
                 "project_description": "A fabricated robotic arm for workshop automation.",
                 "build_path": "CAD design, machined and printed parts, electronics integration, load tests, and revisions.",
                 "category_gate": {"passed": True, "evidence": "Photographs and test video show the physical arm.", "evidence_url": "https://github.com/maker/arm"},
-                "project_gate_evidence": {"multi_stage": evidence, "significant_investment": evidence, "real_challenge": evidence, "real_motivation": "Built to make low-cost workshop automation accessible."},
+                "project_gate_evidence": {
+                    "multi_stage": {"passed": True, "evidence": evidence, "evidence_url": "https://github.com/maker/arm", "evidence_locator": "README: Build and test sections"},
+                    "significant_investment": {"passed": True, "evidence": evidence, "evidence_url": "https://github.com/maker/arm", "evidence_locator": "README: Iteration history"},
+                    "real_challenge": {"passed": True, "evidence": evidence, "evidence_url": "https://github.com/maker/arm", "evidence_locator": "README: Load testing"},
+                    "real_motivation": {"passed": True, "evidence": "Built to make low-cost workshop automation accessible.", "evidence_url": "https://github.com/maker/arm", "evidence_locator": "README: Project goal"},
+                },
                 "necessary_conditions": {
                     "small_team_led": {"passed": True, "evidence": evidence},
                     "what_and_why": {"passed": True, "evidence": evidence},

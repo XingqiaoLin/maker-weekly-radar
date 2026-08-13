@@ -58,21 +58,21 @@ Maker Project 必须由个人或小团队主导，经过实际设计、制作、
 
 | 平台 | 必须可核验的最低门槛 |
 |---|---|
-| Kickstarter | `≥ US$20,000` 或 `≥ 200` 支持者 |
+| Kickstarter | `≥ US$5,000` 或 `≥ 50` 支持者 |
 | Indiegogo | `≥ US$20,000` 或 `≥ 200` 支持者 |
 | GitHub | `≥ 1,000` Stars |
 | Hackaday | 精选、编辑推荐或正式报道 |
 | Hackster.io | 精选或编辑推荐 |
 | Instructables | Featured |
-| YouTube | 单视频 `≥ 200,000` 播放，或频道 `≥ 50,000` 订阅 |
-| Reddit | 单帖公开点赞/分数与评论合计 `≥ 5,000` |
+| YouTube | 单视频 `≥ 25,000` 播放，或频道 `≥ 10,000` 订阅 |
+| Reddit | 单帖公开点赞/分数与评论合计 `≥ 500` |
 | X / Twitter | 单帖公开互动 `≥ 5,000` |
 | Instagram | 单帖公开互动 `≥ 5,000` |
 | Make Magazine | 正式报道 |
 | The Verge | 正式报道 |
 | Tom’s Hardware | 正式报道 |
 
-数据不可见、不可核验、币种无法可靠换算或来源冲突时，热度门失败。RSS 顺序不是热度数据。热度使用执行周报时的真实公开观测值；`captured_at` 可以晚于目标周结束，但项目首次发布日期必须仍在目标周内。
+数据不可见、不可核验、币种无法可靠换算或来源冲突时，热度门失败。RSS 顺序不是热度数据。热度使用执行周报时的真实公开观测值；`captured_at` 可以晚于目标周结束，但项目首次发布日期必须仍在目标周内。降低 Kickstarter、YouTube 和 Reddit 的入池门槛只用于扩大严格编辑候选；物理造物门、时间门、五关、三条红线、卓越度和证据要求不得随之降低。
 
 明确排除：中国大陆平台、Thingiverse、Printables、MakerWorld、纯模型上传、参数分享和素材下载页。
 
@@ -173,10 +173,10 @@ Maker Project 必须由个人或小团队主导，经过实际设计、制作、
       "build_path": "技术、材料、工艺、设计、测试和迭代",
       "category_gate": {"passed": true, "evidence": "物理核心证据", "evidence_url": "https://..."},
       "project_gate_evidence": {
-        "multi_stage": "证据或空字符串",
-        "significant_investment": "证据或空字符串",
-        "real_challenge": "证据或空字符串",
-        "real_motivation": "证据或空字符串"
+        "multi_stage": {"passed": true, "evidence": "设计、制作、测试与迭代证据", "evidence_url": "https://...", "evidence_locator": "步骤、章节或视频时间戳"},
+        "significant_investment": {"passed": true, "evidence": "数天、数周或数月投入证据", "evidence_url": "https://...", "evidence_locator": "步骤、章节或视频时间戳"},
+        "real_challenge": {"passed": true, "evidence": "具体难点及解决证据", "evidence_url": "https://...", "evidence_locator": "步骤、章节或视频时间戳"},
+        "real_motivation": {"passed": true, "evidence": "为什么做及目标证据", "evidence_url": "https://...", "evidence_locator": "步骤、章节或视频时间戳"}
       },
       "necessary_conditions": {
         "small_team_led": {"passed": true, "evidence": "..."},

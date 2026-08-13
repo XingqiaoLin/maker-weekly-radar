@@ -39,15 +39,17 @@ The repository also contains `.codex-plugin/plugin.json`, so the same package ca
 ## Run the collector directly
 
 ```bash
-cp skills/curate-maker-weekly/assets/config.example.json maker-weekly.json
 python3 skills/curate-maker-weekly/scripts/maker_weekly.py run \
-  --config maker-weekly.json \
   --output-dir output
 ```
+
+The bundled default is a zero-credential profile. It automatically reuses `GITHUB_TOKEN`, `GH_TOKEN`, or an existing `gh auth` login when present, but none is required to start. Reddit and YouTube use RSS/public-page paths by default; X and Instagram use bounded anonymous public-page attempts. A blocked platform is reported as incomplete coverage without stopping successful sources. Pass `--config maker-weekly.json` only for an optional custom or credentialed provider profile.
 
 This writes `raw-discoveries.json`, `physical-candidates.json`, `researched.json`, and an explicitly non-publishable raw audit report. Only strict validated selections may become `final.json`.
 
 The collector fails closed when a platform blocks anonymous access or does not expose verifiable metrics. It does not bypass CAPTCHAs, login walls, rate limits, or Cloudflare challenges. See `skills/curate-maker-weekly/references/providers.md` for provider behavior and optional credentials.
+
+The bundled expanded-discovery heat profile uses Kickstarter `US$5,000 or 50 backers`, YouTube `25,000 views or 10,000 channel subscribers`, and Reddit `score + comments >= 500`. These lower gates increase the research pool only; every final selection still needs an original physical result, current-week first publication, maker authorship, visible process, five gates, three red lines, excellence evidence, and strict scoring.
 
 `--as-of` is the target publication cutoff. It is not a historical heat cutoff: metrics collected after that date remain eligible when the project's original publication date is inside the target week, and every metric keeps its actual `metrics_captured_at`.
 

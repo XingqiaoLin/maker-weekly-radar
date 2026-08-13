@@ -78,11 +78,18 @@ def heat_gate(item: dict[str, Any]) -> dict[str, Any]:
     platform = str(item.get("platform") or "").lower().strip()
     metrics = item.get("metrics") if isinstance(item.get("metrics"), dict) else {}
     result: dict[str, Any] = {"status": "unknown", "observed": "无法从候选数据核验", "threshold": "平台未映射", "evidence_url": item.get("url")}
-    if "kickstarter" in platform or "indiegogo" in platform:
+    if "kickstarter" in platform:
         pledged, backers = number(metrics, "usd_pledged", "pledged_usd"), number(metrics, "backers")
+        threshold = maker_weekly.HEAT_THRESHOLDS["kickstarter"]
+        result.update(threshold="US$5,000 或 50 名支持者", observed=f"USD={pledged}; backers={backers}")
+        if pledged is not None or backers is not None:
+            result["status"] = "pass" if (pledged or 0) >= threshold["usd_pledged"] or (backers or 0) >= threshold["backers"] else "fail"
+    elif "indiegogo" in platform:
+        pledged, backers = number(metrics, "usd_pledged", "pledged_usd"), number(metrics, "backers")
+        threshold = maker_weekly.HEAT_THRESHOLDS["indiegogo"]
         result.update(threshold="US$20,000 或 200 名支持者", observed=f"USD={pledged}; backers={backers}")
         if pledged is not None or backers is not None:
-            result["status"] = "pass" if (pledged or 0) >= 20000 or (backers or 0) >= 200 else "fail"
+            result["status"] = "pass" if (pledged or 0) >= threshold["usd_pledged"] or (backers or 0) >= threshold["backers"] else "fail"
     elif "github" in platform:
         stars = number(metrics, "stars")
         result.update(threshold="1,000 Stars", observed=f"stars={stars}")
@@ -90,14 +97,16 @@ def heat_gate(item: dict[str, Any]) -> dict[str, Any]:
             result["status"] = "pass" if stars >= 1000 else "fail"
     elif "youtube" in platform:
         views, subscribers = number(metrics, "views"), number(metrics, "channel_subscribers", "subscribers")
-        result.update(threshold="200,000 播放或频道 50,000 订阅", observed=f"views={views}; subscribers={subscribers}")
+        threshold = maker_weekly.HEAT_THRESHOLDS["youtube"]
+        result.update(threshold="25,000 播放或频道 10,000 订阅", observed=f"views={views}; subscribers={subscribers}")
         if views is not None or subscribers is not None:
-            result["status"] = "pass" if (views or 0) >= 200000 or (subscribers or 0) >= 50000 else "fail"
+            result["status"] = "pass" if (views or 0) >= threshold["views"] or (subscribers or 0) >= threshold["channel_subscribers"] else "fail"
     elif "reddit" in platform:
         score, comments = number(metrics, "upvotes", "score"), number(metrics, "comments")
-        result.update(threshold="公开点赞/分数与评论合计 5,000", observed=f"score={score}; comments={comments}")
+        threshold = maker_weekly.HEAT_THRESHOLDS["reddit"]["score_plus_comments"]
+        result.update(threshold="公开点赞/分数与评论合计 500", observed=f"score={score}; comments={comments}")
         if score is not None and comments is not None:
-            result["status"] = "pass" if score + comments >= 5000 else "fail"
+            result["status"] = "pass" if score + comments >= threshold else "fail"
     elif platform in {"x", "x / twitter", "twitter", "instagram"}:
         interactions = number(metrics, "interactions")
         if interactions is None:
@@ -133,9 +142,10 @@ def annotate_time(item: dict[str, Any], start: datetime, end: datetime) -> dict[
 
 def prepare_payload(payload: dict[str, Any], start: datetime, end: datetime) -> dict[str, Any]:
     result = deepcopy(payload)
+    thresholds = (result.get("config_summary") or {}).get("heat_thresholds")
     for item in result.get("items", []):
         item["canonical_url"] = maker_weekly.canonical_url(str(item.get("url") or ""))
-        item["heat_gate"] = maker_weekly.evaluate_heat_gate(item, end)
+        item["heat_gate"] = maker_weekly.evaluate_heat_gate(item, end, thresholds)
         item["time_gate"] = annotate_time(item, start, end)
     statuses = result.get("source_status") or []
     stage_counts = result.get("stage_counts") if isinstance(result.get("stage_counts"), dict) else {}
@@ -191,6 +201,29 @@ def passed_evidence_map(value: Any, required: set[str], label: str, errors: list
             errors.append(f"{label}.{key} must pass with concrete evidence")
 
 
+def validate_project_gate_evidence(value: Any, errors: list[str]) -> None:
+    if not isinstance(value, dict):
+        errors.append("project_gate_evidence must be an object")
+        return
+    satisfied = 0
+    for key in PROJECT_GATE_KEYS:
+        entry = value.get(key)
+        if not isinstance(entry, dict):
+            errors.append(f"project_gate_evidence.{key} must be an evidence object, not free text")
+            continue
+        if entry.get("passed") is not True:
+            continue
+        satisfied += 1
+        if not str(entry.get("evidence") or "").strip():
+            errors.append(f"project_gate_evidence.{key} requires concrete evidence")
+        if not is_http_url(entry.get("evidence_url")):
+            errors.append(f"project_gate_evidence.{key} requires a primary evidence URL")
+        if not str(entry.get("evidence_locator") or "").strip():
+            errors.append(f"project_gate_evidence.{key} requires a page step, section, timestamp, or other locator")
+    if satisfied < 3:
+        errors.append("project gate requires at least three explicitly passed evidence objects")
+
+
 def validate_decision(decision: dict[str, Any], candidate: dict[str, Any], start: datetime, end: datetime) -> list[str]:
     errors: list[str] = []
     if candidate.get("physical_gate", {}).get("status") != "pass":
@@ -215,13 +248,7 @@ def validate_decision(decision: dict[str, Any], candidate: dict[str, Any], start
     category_gate = decision.get("category_gate")
     if not isinstance(category_gate, dict) or category_gate.get("passed") is not True or not category_gate.get("evidence") or not is_http_url(category_gate.get("evidence_url")):
         errors.append("category_gate must prove a physical core with an evidence URL")
-    project_gate = decision.get("project_gate_evidence")
-    if not isinstance(project_gate, dict):
-        errors.append("project_gate_evidence must be an object")
-    else:
-        satisfied = sum(bool(str(project_gate.get(key) or "").strip()) for key in PROJECT_GATE_KEYS)
-        if satisfied < 3:
-            errors.append("project gate requires evidence for at least three of four dimensions")
+    validate_project_gate_evidence(decision.get("project_gate_evidence"), errors)
     passed_evidence_map(decision.get("necessary_conditions"), NECESSARY_KEYS, "necessary_conditions", errors)
     passed_evidence_map(decision.get("red_lines"), RED_LINE_KEYS, "red_lines", errors)
     excellence = decision.get("excellence")
@@ -371,8 +398,10 @@ def render(payload: dict[str, Any]) -> str:
         ])
         labels = {"multi_stage": "多步骤多阶段", "significant_investment": "投入大耗时长", "real_challenge": "真实挑战", "real_motivation": "真实命题驱动"}
         for key, value in decision["project_gate_evidence"].items():
-            if value:
-                lines.append(f"  - {labels.get(key, key)}：{value}")
+            if isinstance(value, dict) and value.get("passed") is True:
+                lines.append(
+                    f"  - {labels.get(key, key)}：{value['evidence']}；定位：{value['evidence_locator']}；证据：{value['evidence_url']}"
+                )
         lines.extend([
             f"- 卓越方向：{direction_label(excellence['direction'])}",
             f"- 卓越对标话术：“{excellence['benchmark_statement']}”",

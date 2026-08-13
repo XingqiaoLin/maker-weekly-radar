@@ -14,6 +14,8 @@ import html
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -31,7 +33,16 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-USER_AGENT = "maker-weekly-radar/0.6"
+USER_AGENT = "maker-weekly-radar/0.10"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "assets" / "config.example.json"
+HEAT_THRESHOLDS = {
+    "kickstarter": {"usd_pledged": 5_000, "backers": 50},
+    "indiegogo": {"usd_pledged": 20_000, "backers": 200},
+    "youtube": {"views": 25_000, "channel_subscribers": 10_000},
+    "reddit": {"score_plus_comments": 500},
+    "github": {"stars": 1_000},
+    "social": {"interactions": 5_000},
+}
 REQUIRED_PLATFORMS = {
     "Kickstarter", "Indiegogo", "GitHub", "Hackaday", "Hackster.io", "Instructables",
     "YouTube", "Reddit", "X / Twitter", "Instagram", "Make Magazine", "The Verge", "Tom's Hardware",
@@ -60,8 +71,30 @@ class AccessBlocked(RuntimeError):
     pass
 
 
+class ResourceNotFound(RuntimeError):
+    """A public resource is absent; callers may try a bounded alternate path."""
+
+    pass
+
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def resolve_heat_thresholds(overrides: Any = None) -> dict[str, dict[str, float]]:
+    resolved = {platform: dict(values) for platform, values in HEAT_THRESHOLDS.items()}
+    if overrides is None:
+        return resolved
+    if not isinstance(overrides, dict):
+        raise ConfigError("heat_thresholds must be an object")
+    for platform, values in overrides.items():
+        if platform not in resolved or not isinstance(values, dict):
+            raise ConfigError(f"unsupported heat threshold platform: {platform}")
+        for name, value in values.items():
+            if name not in resolved[platform] or not isinstance(value, (int, float)) or value <= 0:
+                raise ConfigError(f"invalid heat threshold: {platform}.{name}")
+            resolved[platform][name] = float(value)
+    return resolved
 
 
 def parse_datetime(value: Any) -> datetime | None:
@@ -174,6 +207,8 @@ def request_bytes(
                 continue
             if exc.code in {401, 403, 429}:
                 raise AccessBlocked(f"HTTP {exc.code} from provider; public collection was blocked or rate-limited") from exc
+            if exc.code == 404:
+                raise ResourceNotFound("HTTP 404 from provider") from exc
             raise RuntimeError(f"HTTP {exc.code} from provider") from exc
         except urllib.error.URLError as exc:
             last_connection_error = exc
@@ -203,6 +238,36 @@ def require_env(source: dict[str, Any], field: str, default_name: str) -> str:
     if not value:
         raise MissingCredential(f"missing environment variable {env_name}")
     return value
+
+
+def discover_github_token(source: dict[str, Any]) -> str | None:
+    """Reuse an existing GitHub login without making credentials mandatory.
+
+    Environment variables remain the first choice. When they are absent, an
+    already-authenticated GitHub CLI session is a safe local convenience: the
+    token is captured in memory and is never printed or written to an artifact.
+    Anonymous GitHub API access remains the final fallback.
+    """
+
+    token_name = str(source.get("token_env") or "GITHUB_TOKEN")
+    token = os.environ.get(token_name) or os.environ.get("GH_TOKEN")
+    if token:
+        return token.strip()
+    if source.get("use_gh_cli", True) is False or shutil.which("gh") is None:
+        return None
+    try:
+        completed = subprocess.run(
+            ["gh", "auth", "token"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip() or None
 
 
 def candidate(
@@ -259,24 +324,25 @@ def publication_is_in_window(item: dict[str, Any], since: datetime, as_of: datet
     return bool(published and since <= published <= as_of)
 
 
-def verified_platform_heat_passes(item: dict[str, Any]) -> bool:
+def verified_platform_heat_passes(item: dict[str, Any], thresholds: Any = None) -> bool:
     """Apply public YouTube/Reddit heat gates before a platform Top 5 is chosen."""
     verification = item.get("metric_verification") or {}
     if verification.get("status") != "ok":
         return False
     metrics = item.get("metrics") or {}
     platform = str(item.get("platform") or "").lower()
+    resolved = resolve_heat_thresholds(thresholds)
     if "youtube" in platform:
-        return int(metrics.get("views") or 0) >= 200_000 or int(metrics.get("channel_subscribers") or 0) >= 50_000
+        threshold = resolved["youtube"]
+        return int(metrics.get("views") or 0) >= threshold["views"] or int(metrics.get("channel_subscribers") or 0) >= threshold["channel_subscribers"]
     if "reddit" in platform:
-        return int(metrics.get("score") or 0) + int(metrics.get("comments") or 0) >= 5_000
+        return int(metrics.get("score") or 0) + int(metrics.get("comments") or 0) >= resolved["reddit"]["score_plus_comments"]
     raise ConfigError("verified_heat_only currently supports YouTube and Reddit sources")
 
 
 def collect_github(source: dict[str, Any], context: dict[str, Any]) -> list[dict[str, Any]]:
     headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-    token_name = str(source.get("token_env") or "GITHUB_TOKEN")
-    github_token = os.environ.get(token_name) or os.environ.get("GH_TOKEN")
+    github_token = discover_github_token(source)
     if github_token:
         headers["Authorization"] = f"Bearer {github_token}"
     queries = source.get("queries") or [source.get("query") or "topic:3d-printing"]
@@ -732,8 +798,13 @@ def github_readme_page(item: dict[str, Any], timeout: int) -> dict[str, Any]:
                 break
             except AccessBlocked:
                 raise
-            except RuntimeError as exc:
+            except ResourceNotFound as exc:
                 last_error = exc
+            except RuntimeError:
+                # A connection/TLS/provider failure will affect every alternate
+                # README spelling as well. Stop instead of multiplying the same
+                # timeout across up to twelve URLs.
+                raise
         if readme:
             break
     if not readme:
@@ -911,6 +982,13 @@ def collect_web_html(source: dict[str, Any], context: dict[str, Any]) -> list[di
             evidence=[page_url, discovered_item["listing_url"]], raw_score=raw_score,
         )
         if item:
+            item["physical_page"] = {
+                "source_url": page_url,
+                "text": f"{metadata['title']} {metadata['summary']} {metadata['visible_text']}",
+                "media_urls": page_media_urls(parser, raw_text, page_url),
+                "structured_steps": len(re.findall(r"\bstep\s+[0-9]+\b", metadata["visible_text"], flags=re.IGNORECASE)),
+                "author": metadata.get("author"),
+            }
             results.append(item)
     if not results:
         raise RuntimeError("public listing links were found, but no detail page produced a candidate inside the target window")
@@ -996,6 +1074,7 @@ def collect_kickstarter_kicktraq(source: dict[str, Any], context: dict[str, Any]
     required_keywords = [str(value).lower() for value in source.get("keywords") or []]
     excluded_keywords = [str(value).lower() for value in source.get("exclude_keywords") or []]
     captured_at = iso_z(now_utc())
+    kickstarter_threshold = resolve_heat_thresholds(context.get("heat_thresholds"))["kickstarter"]
 
     def load_project(discovered_item: dict[str, str]) -> tuple[dict[str, str], dict[str, Any] | None]:
         widget_url = discovered_item["url"] + "/widget/card.html?v=2"
@@ -1046,12 +1125,12 @@ def collect_kickstarter_kicktraq(source: dict[str, Any], context: dict[str, Any]
             source, title, project_url, summary=summary, author=creator.get("name"), published_at=launched,
             metrics=metrics, metrics_captured_at=captured_at, tags=tags,
             evidence=[project_url, project["_widget_url"], discovered_item["kicktraq_url"], discovered_item["listing_url"]],
-            raw_score=usd_pledged / 20_000 + backers / 200,
+            raw_score=usd_pledged / kickstarter_threshold["usd_pledged"] + backers / kickstarter_threshold["backers"],
         )
         if item:
             item["metric_verification"] = {
                 "status": "ok", "source_url": project["_widget_url"], "captured_at": captured_at,
-                "ranking_basis": "usd_pledged/20000 + backers/200",
+                "ranking_basis": "usd_pledged/5000 + backers/50",
             }
             results.append(item)
     if parsed_details == 0:
@@ -1245,7 +1324,7 @@ def enrich_youtube_public(item: dict[str, Any], timeout: int) -> None:
     item["metrics_captured_at"] = iso_z(now_utc())
     item["metric_verification"] = {
         "status": "ok", "source_url": detail_url, "captured_at": item["metrics_captured_at"],
-        "ranking_basis": "views/200000 + channel_subscribers/50000",
+        "ranking_basis": "views/25000 + channel_subscribers/10000",
     }
     item["evidence"] = list(dict.fromkeys((item.get("evidence") or []) + [detail_url]))
     metadata = public_page_metadata(parser, detail_url)
@@ -1259,9 +1338,10 @@ def enrich_youtube_public(item: dict[str, Any], timeout: int) -> None:
     # Normalize both public signals by the editorial heat thresholds. This keeps
     # a subscriber-qualified video comparable with a view-qualified video while
     # preserving views as a useful tie-breaker between videos on one channel.
+    threshold = resolve_heat_thresholds(item.get("_heat_thresholds"))["youtube"]
     item["_raw_score"] = (
-        float(metrics.get("views") or 0) / 200_000
-        + float(metrics.get("channel_subscribers") or 0) / 50_000
+        float(metrics.get("views") or 0) / threshold["views"]
+        + float(metrics.get("channel_subscribers") or 0) / threshold["channel_subscribers"]
     )
 
 
@@ -1499,6 +1579,7 @@ def collect_rss(source: dict[str, Any], context: dict[str, Any]) -> list[dict[st
                 raw_score=keyword_hits * 10 + max(0, context["lookback_days"] - age_days) + feed_order_score,
             )
             if item:
+                item["_heat_thresholds"] = resolve_heat_thresholds(context.get("heat_thresholds"))
                 rss_media = rss_entry_media_urls(entry, summary)
                 merge_physical_page(item, {
                     "source_url": link,
@@ -1523,6 +1604,8 @@ def collect_rss(source: dict[str, Any], context: dict[str, Any]) -> list[dict[st
             reverse=True,
         )[:detail_limit]
     enrich_rss_details(source, results, context["timeout"])
+    for item in results:
+        item.pop("_heat_thresholds", None)
     # Raw discovery deliberately keeps metric failures and sub-threshold posts.
     # The platform heat gate runs only after the physical and time gates.
     return results
@@ -1670,6 +1753,7 @@ def collect_raw_envelope(config_path: Path, as_of: datetime, source_ids: set[str
         "as_of": as_of, "since": window_start, "lookback_days": lookback_days,
         "limit": int(config.get("discovery_per_source", 50)), "timeout": int(config.get("request_timeout_seconds", 20)), "keywords": [word.lower() for word in keywords],
         "config_dir": config_path.resolve().parent,
+        "heat_thresholds": resolve_heat_thresholds(config.get("heat_thresholds")),
     }
     collected, statuses = [], []
     for source in config["sources"]:
@@ -1680,6 +1764,17 @@ def collect_raw_envelope(config_path: Path, as_of: datetime, source_ids: set[str
             continue
         try:
             raw_items = COLLECTORS[source["type"]](source, context)
+            discovery_limit = int(source.get("raw_discovery_limit") or context["limit"])
+            if discovery_limit < 1:
+                raise ConfigError(f"raw_discovery_limit for {source['id']} must be at least 1")
+            # This is only a bounded raw-fetch budget, not the platform Top 5.
+            # The Make Something Gate, time gate, and heat gate still run before
+            # the later editorial Top 5 calculation.
+            raw_items = sorted(
+                raw_items,
+                key=lambda item: (item.get("_raw_score", 0.0), item.get("published_at") or ""),
+                reverse=True,
+            )[:discovery_limit]
             collected.extend(raw_items)
             verification = [str(item.get("metric_verification", {}).get("status") or "") for item in raw_items]
             detail_failures = bool(verification) and all(value in {"error", "blocked"} for value in verification)
@@ -1711,6 +1806,7 @@ def collect_raw_envelope(config_path: Path, as_of: datetime, source_ids: set[str
             "top_per_source": limit,
             "final_top": int(config.get("final_top", 15)),
             "keywords": keywords,
+            "heat_thresholds": context["heat_thresholds"],
         },
         "source_status": statuses,
         "stage_counts": {"raw_discoveries": len(collected)},
@@ -1764,10 +1860,11 @@ def metric_number(metrics: dict[str, Any], *names: str) -> float | None:
     return None
 
 
-def evaluate_heat_gate(item: dict[str, Any], as_of: datetime) -> dict[str, Any]:
+def evaluate_heat_gate(item: dict[str, Any], as_of: datetime, thresholds: Any = None) -> dict[str, Any]:
     """Evaluate heat observed during execution; ``as_of`` only bounds publication."""
     platform = str(item.get("platform") or "").lower().strip()
     metrics = item.get("metrics") if isinstance(item.get("metrics"), dict) else {}
+    resolved = resolve_heat_thresholds(thresholds)
     captured = parse_datetime(item.get("metrics_captured_at"))
     gate: dict[str, Any] = {"status": "unknown", "threshold": "平台未映射", "observed": "无法核验", "captured_at": item.get("metrics_captured_at"), "evidence_url": item.get("url")}
     dynamic = any(value in platform for value in (
@@ -1778,19 +1875,27 @@ def evaluate_heat_gate(item: dict[str, Any], as_of: datetime) -> dict[str, Any]:
         return gate
     if captured is not None:
         gate["observation_policy"] = "execution_time"
-    if "kickstarter" in platform or "indiegogo" in platform:
+    if "kickstarter" in platform:
         pledged, backers = metric_number(metrics, "usd_pledged", "pledged_usd"), metric_number(metrics, "backers")
+        threshold = resolved["kickstarter"]
+        gate.update(threshold="US$5,000 或 50 名支持者", observed=f"USD={pledged}; backers={backers}")
+        gate["status"] = "pass" if (pledged or 0) >= threshold["usd_pledged"] or (backers or 0) >= threshold["backers"] else "fail"
+    elif "indiegogo" in platform:
+        pledged, backers = metric_number(metrics, "usd_pledged", "pledged_usd"), metric_number(metrics, "backers")
+        threshold = resolved["indiegogo"]
         gate.update(threshold="US$20,000 或 200 名支持者", observed=f"USD={pledged}; backers={backers}")
-        gate["status"] = "pass" if (pledged or 0) >= 20000 or (backers or 0) >= 200 else "fail"
+        gate["status"] = "pass" if (pledged or 0) >= threshold["usd_pledged"] or (backers or 0) >= threshold["backers"] else "fail"
     elif "github" in platform:
         stars = metric_number(metrics, "stars")
         gate.update(threshold="1,000 Stars", observed=f"stars={stars}", status="pass" if stars is not None and stars >= 1000 else "fail")
     elif "youtube" in platform:
         views, subscribers = metric_number(metrics, "views"), metric_number(metrics, "channel_subscribers", "subscribers")
-        gate.update(threshold="200,000 播放或频道 50,000 订阅", observed=f"views={views}; subscribers={subscribers}", status="pass" if (views or 0) >= 200000 or (subscribers or 0) >= 50000 else "fail")
+        threshold = resolved["youtube"]
+        gate.update(threshold="25,000 播放或频道 10,000 订阅", observed=f"views={views}; subscribers={subscribers}", status="pass" if (views or 0) >= threshold["views"] or (subscribers or 0) >= threshold["channel_subscribers"] else "fail")
     elif "reddit" in platform:
         score, comments = metric_number(metrics, "score", "upvotes"), metric_number(metrics, "comments")
-        gate.update(threshold="score + comments >= 5,000", observed=f"score={score}; comments={comments}", status="pass" if score is not None and comments is not None and score + comments >= 5000 else "fail")
+        threshold = resolved["reddit"]["score_plus_comments"]
+        gate.update(threshold="score + comments >= 500", observed=f"score={score}; comments={comments}", status="pass" if score is not None and comments is not None and score + comments >= threshold else "fail")
     elif platform in {"x", "x / twitter", "twitter", "instagram"}:
         values = [metric_number(metrics, name) for name in ("likes", "comments", "reposts", "replies", "quotes")]
         interactions = metric_number(metrics, "interactions")
@@ -1810,10 +1915,11 @@ def editorial_candidates_envelope(payload: dict[str, Any], as_of: datetime) -> d
     result = deepcopy(payload)
     start = parse_datetime(result.get("window_start")) or as_of
     limit = int((result.get("config_summary") or {}).get("top_per_source", 5))
+    thresholds = (result.get("config_summary") or {}).get("heat_thresholds")
     passed: list[dict[str, Any]] = []
     for item in result.get("items") or []:
         item["time_gate"] = {"status": "pass" if publication_is_in_window(item, start, as_of) else "fail"}
-        item["heat_gate"] = evaluate_heat_gate(item, as_of)
+        item["heat_gate"] = evaluate_heat_gate(item, as_of, thresholds)
         if item.get("physical_gate", {}).get("status") == "pass" and item["time_gate"]["status"] == "pass" and item["heat_gate"]["status"] == "pass":
             passed.append(item)
     top_items: list[dict[str, Any]] = []
@@ -1824,7 +1930,7 @@ def editorial_candidates_envelope(payload: dict[str, Any], as_of: datetime) -> d
     result["selection_method"] = "physical-time-heat-platform-top5"
     time_passed = sum(publication_is_in_window(item, start, as_of) for item in payload.get("items") or [])
     heat_passed = sum(
-        publication_is_in_window(item, start, as_of) and evaluate_heat_gate(item, as_of).get("status") == "pass"
+        publication_is_in_window(item, start, as_of) and evaluate_heat_gate(item, as_of, thresholds).get("status") == "pass"
         for item in payload.get("items") or []
     )
     result["stage_counts"] = {
@@ -1834,7 +1940,7 @@ def editorial_candidates_envelope(payload: dict[str, Any], as_of: datetime) -> d
     for status in result.get("source_status") or []:
         source_items = [item for item in payload.get("items") or [] if item.get("source_id") == status.get("source_id")]
         status["time_count"] = sum(publication_is_in_window(item, start, as_of) for item in source_items)
-        status["heat_count"] = sum(publication_is_in_window(item, start, as_of) and evaluate_heat_gate(item, as_of).get("status") == "pass" for item in source_items)
+        status["heat_count"] = sum(publication_is_in_window(item, start, as_of) and evaluate_heat_gate(item, as_of, thresholds).get("status") == "pass" for item in source_items)
         status["candidate_count"] = sum(item.get("source_id") == status.get("source_id") for item in result["items"])
         status["count"] = status["candidate_count"]
     return result
@@ -1843,7 +1949,12 @@ def editorial_candidates_envelope(payload: dict[str, Any], as_of: datetime) -> d
 def collect_envelope(config_path: Path, as_of: datetime, source_ids: set[str] | None = None) -> dict[str, Any]:
     """Compatibility entry point returning stage-three editorial candidates."""
     raw = collect_raw_envelope(config_path, as_of, source_ids)
-    _, physical = physical_prefilter_envelopes(raw, timeout=int(load_config(config_path).get("request_timeout_seconds", 20)))
+    config = load_config(config_path)
+    _, physical = physical_prefilter_envelopes(
+        raw,
+        timeout=int(config.get("physical_detail_timeout_seconds", min(12, int(config.get("request_timeout_seconds", 20))))),
+        workers=int(config.get("physical_detail_workers", 8)),
+    )
     return editorial_candidates_envelope(physical, as_of)
 
 
@@ -1985,7 +2096,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     collect = sub.add_parser("collect", help="collect raw discoveries for audit")
-    collect.add_argument("--config", required=True, type=Path)
+    collect.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="config JSON; defaults to the bundled zero-credential profile")
     collect.add_argument("--output", required=True, type=Path)
     collect.add_argument("--as-of")
     collect.add_argument("--source", action="append", help="collect only this source id; repeat for multiple sources")
@@ -2002,7 +2113,7 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--input", required=True, type=Path)
     render.add_argument("--output", required=True, type=Path)
     run = sub.add_parser("run", help="write raw, physical, editorial-candidate, and audit artifacts")
-    run.add_argument("--config", required=True, type=Path)
+    run.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="config JSON; defaults to the bundled zero-credential profile")
     run.add_argument("--output-dir", required=True, type=Path)
     run.add_argument("--as-of")
     run.add_argument("--source", action="append", help="collect only this source id; repeat for multiple sources")
@@ -2040,8 +2151,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"rendered report -> {args.output}")
         elif args.command == "run":
             as_of = parse_as_of(args.as_of)
+            config = load_config(args.config)
             raw = collect_raw_envelope(args.config, as_of, set(args.source or []))
-            annotated_raw, physical = physical_prefilter_envelopes(raw, timeout=int(load_config(args.config).get("request_timeout_seconds", 20)))
+            annotated_raw, physical = physical_prefilter_envelopes(
+                raw,
+                timeout=int(config.get("physical_detail_timeout_seconds", min(12, int(config.get("request_timeout_seconds", 20))))),
+                workers=int(config.get("physical_detail_workers", 8)),
+            )
             researched = editorial_candidates_envelope(physical, as_of)
             audit = baseline_envelope(annotated_raw)
             write_json(args.output_dir / "raw-discoveries.json", annotated_raw)

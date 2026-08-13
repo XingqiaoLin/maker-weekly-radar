@@ -6,6 +6,14 @@
   "top_per_source": 5,
   "final_top": 15,
   "request_timeout_seconds": 20,
+  "physical_detail_timeout_seconds": 12,
+  "physical_detail_workers": 8,
+  "heat_thresholds": {
+    "kickstarter": {"usd_pledged": 5000, "backers": 50},
+    "indiegogo": {"usd_pledged": 20000, "backers": 200},
+    "youtube": {"views": 25000, "channel_subscribers": 10000},
+    "reddit": {"score_plus_comments": 500}
+  },
   "keywords": ["maker", "diy", "open hardware", "robot", "robotics", "wearable", "mechanical", "electronics", "fabrication", "3d print", "cnc", "kinetic"],
   "sources": [
     {
@@ -22,7 +30,8 @@
       ],
       "required_terms": ["open hardware", "open-hardware", "robot", "hardware", "3d print", "3d-print", "wearable", "mechanical", "electronics", "fabrication"],
       "date_qualifier": "created",
-      "token_env": "GITHUB_TOKEN"
+      "token_env": "GITHUB_TOKEN",
+      "use_gh_cli": true
     },
     {
       "id": "youtube-rss",
