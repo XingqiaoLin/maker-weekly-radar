@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-USER_AGENT = "maker-weekly-radar/0.10"
+USER_AGENT = "maker-weekly-radar/0.11"
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "assets" / "config.example.json"
 HEAT_THRESHOLDS = {
     "kickstarter": {"usd_pledged": 5_000, "backers": 50},
@@ -49,7 +49,7 @@ REQUIRED_PLATFORMS = {
 }
 SUPPORTED_TYPES = {
     "github", "youtube", "reddit", "instagram", "rss", "manual", "web_html", "instructables_web",
-    "kickstarter_kicktraq", "indiegogo_public",
+    "kickstarter_kicktraq", "indiegogo_public", "instagram_fallback",
 }
 TRACKING_PARAMS = {
     "fbclid", "gclid", "mc_cid", "mc_eid", "ref", "source", "utm_campaign",
@@ -308,6 +308,154 @@ def candidate(
     }
 
 
+SOCIAL_EVIDENCE_PROVENANCE = {"browser_visible", "instagram_graph", "reddit_oauth", "official_api"}
+SOCIAL_PLATFORM_HOSTS = {
+    "reddit": {"reddit.com", "www.reddit.com", "old.reddit.com", "oauth.reddit.com"},
+    "instagram": {"instagram.com", "www.instagram.com", "graph.facebook.com", "graph.instagram.com"},
+}
+
+
+def social_platform_key(value: Any) -> str:
+    text = str(value or "").lower()
+    if "reddit" in text:
+        return "reddit"
+    if "instagram" in text:
+        return "instagram"
+    return text.strip()
+
+
+def official_social_url(platform: str, value: Any) -> bool:
+    try:
+        host = (urllib.parse.urlsplit(str(value or "")).hostname or "").lower()
+    except ValueError:
+        return False
+    allowed = SOCIAL_PLATFORM_HOSTS.get(social_platform_key(platform), set())
+    return host in allowed
+
+
+def browser_evidence_path(source: dict[str, Any], context: dict[str, Any]) -> Path | None:
+    env_name = str(source.get("browser_evidence_env") or "MAKER_WEEKLY_BROWSER_EVIDENCE")
+    configured = os.environ.get(env_name) or source.get("browser_evidence_file")
+    if not configured:
+        return None
+    path = Path(str(configured)).expanduser()
+    if not path.is_absolute():
+        path = context["config_dir"] / path
+    if not path.is_file():
+        raise ConfigError(f"browser evidence file not found: {path}")
+    return path
+
+
+def browser_evidence_records(source: dict[str, Any], context: dict[str, Any]) -> list[dict[str, Any]]:
+    path = browser_evidence_path(source, context)
+    if path is None:
+        return []
+    cache = context.setdefault("_browser_evidence_cache", {})
+    cache_key = str(path.resolve())
+    if cache_key not in cache:
+        payload = read_json(path)
+        records = payload.get("items") if isinstance(payload, dict) else payload
+        if not isinstance(records, list):
+            raise ConfigError("browser evidence must be an array or an object containing an items array")
+        cache[cache_key] = [record for record in records if isinstance(record, dict)]
+    platform = social_platform_key(source.get("platform"))
+    return [
+        record for record in cache[cache_key]
+        if social_platform_key(record.get("platform")) == platform
+    ]
+
+
+def validate_social_evidence_record(record: dict[str, Any], platform: str, require_title: bool = False) -> None:
+    provenance = str(record.get("provenance") or "")
+    if provenance not in SOCIAL_EVIDENCE_PROVENANCE:
+        raise ConfigError(f"unsupported social evidence provenance: {provenance or 'missing'}")
+    url = str(record.get("url") or "")
+    source_url = str(record.get("source_url") or url)
+    if not official_social_url(platform, url) or not official_social_url(platform, source_url):
+        raise ConfigError("social evidence URL must be hosted by the original platform")
+    if require_title and not clean_text(record.get("title"), 300):
+        raise ConfigError("social discovery evidence requires title")
+    metrics = record.get("metrics")
+    if not isinstance(metrics, dict):
+        raise ConfigError("social evidence requires a metrics object")
+    captured = parse_datetime(record.get("captured_at") or record.get("metrics_captured_at"))
+    if captured is None:
+        raise ConfigError("social evidence requires a real captured_at timestamp")
+    key = social_platform_key(platform)
+    required = ("score", "comments") if key == "reddit" else ("likes", "comments")
+    if any(not isinstance(metrics.get(name), (int, float)) for name in required):
+        raise ConfigError(f"{key} evidence requires numeric {' and '.join(required)}")
+
+
+def apply_social_evidence(item: dict[str, Any], record: dict[str, Any]) -> None:
+    platform = str(item.get("platform") or record.get("platform") or "")
+    validate_social_evidence_record(record, platform)
+    if canonical_url(str(item.get("url") or "")) != canonical_url(str(record.get("url") or "")):
+        raise ConfigError("social evidence URL does not match its candidate")
+    metrics = record["metrics"]
+    captured = iso_z(parse_datetime(record.get("captured_at") or record.get("metrics_captured_at")))
+    source_url = str(record.get("source_url") or record["url"])
+    item["metrics"] = {**(item.get("metrics") or {}), **metrics}
+    item["metrics_captured_at"] = captured
+    item["metric_verification"] = {
+        "status": "ok", "source_url": source_url, "captured_at": captured,
+        "provenance": record["provenance"],
+        "ranking_basis": "score + comments" if social_platform_key(platform) == "reddit" else "likes + comments",
+    }
+    if record.get("published_at") and not item.get("published_at"):
+        item["published_at"] = iso_z(parse_datetime(record.get("published_at")))
+    if record.get("author") and not item.get("author"):
+        item["author"] = clean_text(record.get("author"), 200)
+    if record.get("summary") and len(clean_text(record.get("summary"))) > len(item.get("summary") or ""):
+        item["summary"] = clean_text(record.get("summary"))
+    item["evidence"] = list(dict.fromkeys((item.get("evidence") or []) + [str(record["url"]), source_url]))
+    if isinstance(record.get("physical_evidence"), dict):
+        item["physical_evidence"] = record["physical_evidence"]
+    item["_raw_score"] = float(sum(value for value in metrics.values() if isinstance(value, (int, float))))
+
+
+def evidence_record_candidate(source: dict[str, Any], record: dict[str, Any]) -> dict[str, Any] | None:
+    validate_social_evidence_record(record, str(source.get("platform") or ""), require_title=True)
+    metrics = record["metrics"]
+    item = candidate(
+        source, record.get("title"), record.get("url"), summary=record.get("summary"), author=record.get("author"),
+        published_at=record.get("published_at"), metrics=metrics, tags=record.get("tags") or [],
+        evidence=record.get("evidence") or [record.get("url"), record.get("source_url")],
+        raw_score=sum(value for value in metrics.values() if isinstance(value, (int, float))),
+        metrics_captured_at=record.get("captured_at") or record.get("metrics_captured_at"),
+        physical_evidence=record.get("physical_evidence"),
+    )
+    if item:
+        apply_social_evidence(item, record)
+    return item
+
+
+def social_relay_records(
+    source: dict[str, Any], context: dict[str, Any], *, urls: list[str] | None = None,
+) -> list[dict[str, Any]] | None:
+    env_name = str(source.get("relay_url_env") or "MAKER_WEEKLY_SOCIAL_RELAY_URL")
+    endpoint = os.environ.get(env_name) or source.get("relay_url")
+    if not endpoint:
+        return None
+    if not str(endpoint).startswith("https://") and not str(endpoint).startswith("http://localhost"):
+        raise ConfigError("social evidence relay must use HTTPS or localhost")
+    body = {
+        "platform": social_platform_key(source.get("platform")),
+        "since": iso_z(context.get("since")), "as_of": iso_z(context.get("as_of")),
+        "limit": int(context.get("limit") or 50), "urls": urls or [],
+        "hashtags": [str(value) for value in source.get("hashtags") or []],
+    }
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    token_env = str(source.get("relay_token_env") or "MAKER_WEEKLY_SOCIAL_RELAY_TOKEN")
+    if os.environ.get(token_env):
+        headers["Authorization"] = f"Bearer {os.environ[token_env]}"
+    payload = request_json(str(endpoint), context["timeout"], headers=headers, data=json.dumps(body).encode("utf-8"))
+    records = payload.get("items")
+    if not isinstance(records, list):
+        raise RuntimeError("social evidence relay returned no items array")
+    return [record for record in records if isinstance(record, dict)]
+
+
 def cap_and_rank(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     ordered = sorted(items, key=lambda item: (item.get("_raw_score", 0.0), item.get("published_at") or ""), reverse=True)[:limit]
     count = len(ordered)
@@ -439,6 +587,101 @@ def reddit_token(source: dict[str, Any], timeout: int) -> str:
     return str(token)
 
 
+def reddit_installed_client_id(source: dict[str, Any]) -> str | None:
+    env_name = str(source.get("installed_client_id_env") or "REDDIT_INSTALLED_CLIENT_ID")
+    return clean_text(os.environ.get(env_name) or source.get("installed_client_id"), 200) or None
+
+
+def reddit_installed_token(source: dict[str, Any], timeout: int) -> str:
+    client_id = reddit_installed_client_id(source)
+    if not client_id:
+        raise MissingCredential("Reddit Installed-App client ID is not configured")
+    user_agent = str(source.get("user_agent") or os.environ.get("REDDIT_USER_AGENT") or USER_AGENT)
+    device_env = str(source.get("device_id_env") or "REDDIT_DEVICE_ID")
+    device_id = clean_text(os.environ.get(device_env) or source.get("device_id") or "DO_NOT_TRACK_THIS_DEVICE", 100)
+    basic = base64.b64encode(f"{client_id}:".encode()).decode()
+    data = urllib.parse.urlencode({
+        "grant_type": "https://oauth.reddit.com/grants/installed_client",
+        "device_id": device_id,
+    }).encode()
+    payload = request_json(
+        "https://www.reddit.com/api/v1/access_token", timeout,
+        headers={"Authorization": f"Basic {basic}", "User-Agent": user_agent, "Content-Type": "application/x-www-form-urlencoded"},
+        data=data,
+    )
+    token = payload.get("access_token")
+    if not token:
+        raise RuntimeError("Reddit Installed-App OAuth did not return an access token")
+    return str(token)
+
+
+def reddit_post_id(value: Any) -> str:
+    match = re.search(r"/comments/([A-Za-z0-9]+)(?:/|$)", str(value or ""))
+    return match.group(1) if match else ""
+
+
+def apply_reddit_post_data(item: dict[str, Any], post: dict[str, Any], source_url: str, provenance: str) -> None:
+    if not isinstance(post.get("score"), (int, float)) or not isinstance(post.get("num_comments"), (int, float)):
+        raise RuntimeError("Reddit OAuth response omitted score or num_comments")
+    score, comments = int(post["score"]), int(post["num_comments"])
+    item.setdefault("metrics", {}).update({"score": score, "comments": comments})
+    captured = iso_z(now_utc())
+    item["metrics_captured_at"] = captured
+    item["metric_verification"] = {
+        "status": "ok", "source_url": source_url, "captured_at": captured,
+        "provenance": provenance, "ranking_basis": "score + comments",
+    }
+    if not item.get("author") and post.get("author"):
+        item["author"] = clean_text(post.get("author"), 200)
+    item["evidence"] = list(dict.fromkeys((item.get("evidence") or []) + [str(item.get("url") or ""), source_url]))
+    post_media: list[str] = []
+    destination = str(post.get("url_overridden_by_dest") or "")
+    if substantive_media_url(destination):
+        post_media.append(destination)
+    preview = post.get("preview") if isinstance(post.get("preview"), dict) else {}
+    images = preview.get("images") if isinstance(preview.get("images"), list) else []
+    if images and isinstance(images[0], dict):
+        preview_source = images[0].get("source") if isinstance(images[0].get("source"), dict) else {}
+        if preview_source.get("url"):
+            post_media.append(html.unescape(str(preview_source["url"])))
+    merge_physical_page(item, {
+        "source_url": str(item.get("url") or source_url), "text": clean_text(post.get("selftext"), 10000),
+        "media_urls": post_media, "structured_steps": 0, "author": item.get("author"),
+    })
+    item["_raw_score"] = float(score + comments)
+
+
+def enrich_reddit_installed_batch(
+    source: dict[str, Any], items: list[dict[str, Any]], context: dict[str, Any],
+) -> set[str]:
+    client_id = reddit_installed_client_id(source)
+    if not client_id or not items:
+        return set()
+    token = reddit_installed_token(source, context["timeout"])
+    user_agent = str(source.get("user_agent") or os.environ.get("REDDIT_USER_AGENT") or USER_AGENT)
+    headers = {"Authorization": f"Bearer {token}", "User-Agent": user_agent}
+    by_post_id = {reddit_post_id(item.get("url")): item for item in items if reddit_post_id(item.get("url"))}
+    resolved: set[str] = set()
+    post_ids = list(by_post_id)
+    for offset in range(0, len(post_ids), 100):
+        batch = post_ids[offset:offset + 100]
+        query = urllib.parse.urlencode({"id": ",".join(f"t3_{post_id}" for post_id in batch), "raw_json": 1})
+        source_url = f"https://oauth.reddit.com/api/info?{query}"
+        payload = request_json(source_url, context["timeout"], headers=headers)
+        children = (payload.get("data") or {}).get("children") or []
+        for child in children:
+            post = child.get("data") if isinstance(child, dict) else None
+            if not isinstance(post, dict):
+                continue
+            post_id = str(post.get("id") or "")
+            item = by_post_id.get(post_id)
+            if item is None:
+                continue
+            apply_reddit_post_data(item, post, source_url, "reddit_oauth")
+            resolved.add(str(item.get("id") or canonical_url(item["url"])))
+    return resolved
+
+
 def collect_reddit(source: dict[str, Any], context: dict[str, Any]) -> list[dict[str, Any]]:
     token = reddit_token(source, context["timeout"])
     user_agent = str(source.get("user_agent") or USER_AGENT)
@@ -493,8 +736,74 @@ def collect_instagram(source: dict[str, Any], context: dict[str, Any]) -> list[d
                 tags=[str(hashtag), str(post.get("media_type") or "")], evidence=[post.get("permalink")], raw_score=likes + comments * 4,
             )
             if item:
+                item["metric_verification"] = {
+                    "status": "ok", "source_url": str(post.get("permalink") or ""),
+                    "captured_at": item["metrics_captured_at"], "provenance": "instagram_graph",
+                    "ranking_basis": "likes + comments",
+                }
                 results.append(item)
     return results
+
+
+def collect_instagram_fallback(source: dict[str, Any], context: dict[str, Any]) -> list[dict[str, Any]]:
+    """Use official evidence first and keep anonymous HTML discovery-only."""
+    failures: list[Exception] = []
+    token_env = str(source.get("access_token_env") or "INSTAGRAM_ACCESS_TOKEN")
+    user_env = str(source.get("user_id_env") or "INSTAGRAM_USER_ID")
+    if os.environ.get(token_env) and os.environ.get(user_env):
+        try:
+            return collect_instagram(source, context)
+        except (AccessBlocked, RuntimeError, ConfigError) as exc:
+            failures.append(exc)
+
+    try:
+        relay = social_relay_records(source, context)
+        if relay is not None:
+            results = []
+            for record in relay:
+                item = evidence_record_candidate(source, record)
+                published = parse_datetime(item.get("published_at")) if item else None
+                if item and published and context["since"] <= published <= context["as_of"]:
+                    results.append(item)
+            return deduplicate(results)
+    except (AccessBlocked, RuntimeError, ConfigError) as exc:
+        failures.append(exc)
+
+    try:
+        records = browser_evidence_records(source, context)
+        if records:
+            results = []
+            for record in records:
+                item = evidence_record_candidate(source, record)
+                published = parse_datetime(item.get("published_at")) if item else None
+                if item and published and context["since"] <= published <= context["as_of"]:
+                    results.append(item)
+            return deduplicate(results)
+    except (OSError, json.JSONDecodeError, ConfigError) as exc:
+        failures.append(exc)
+
+    try:
+        discoveries = collect_web_html(source, context)
+        for item in discoveries:
+            item["metrics"] = {}
+            item["metrics_captured_at"] = None
+            item["metric_verification"] = {
+                "status": "blocked", "captured_at": iso_z(now_utc()),
+                "provenance": "anonymous_discovery", "detail": "anonymous Instagram pages are discovery-only; exact heat requires Graph or browser evidence",
+            }
+            item["_raw_score"] = 0.0
+        return discoveries
+    except (AccessBlocked, RuntimeError, ConfigError) as exc:
+        failures.append(exc)
+
+    detail = "; ".join(clean_text(str(exc), 240) for exc in failures) or "no Instagram evidence path was available"
+    access_limited = any(
+        isinstance(exc, AccessBlocked) or "requires JavaScript or login" in str(exc) or "no matching public project links" in str(exc)
+        for exc in failures
+    )
+    if access_limited:
+        raise AccessBlocked(f"all Instagram evidence paths failed: {detail}")
+    raise RuntimeError(f"all Instagram evidence paths failed: {detail}")
 
 
 class PublicPageParser(HTMLParser):
@@ -1490,9 +1799,55 @@ def enrich_reddit_public(item: dict[str, Any], timeout: int) -> None:
     item["_raw_score"] = float(score + comments)
 
 
-def enrich_rss_details(source: dict[str, Any], results: list[dict[str, Any]], timeout: int) -> None:
+def enrich_reddit_fallback(source: dict[str, Any], results: list[dict[str, Any]], context: dict[str, Any]) -> None:
+    """Resolve Reddit heat through OAuth, then audited browser evidence.
+
+    RSS and anonymous pages remain discovery sources only in this strict mode.
+    The legacy ``reddit_old`` enrichment remains available to custom profiles.
+    """
+    unresolved = list(results)
+    oauth_error: Exception | None = None
+    if reddit_installed_client_id(source):
+        try:
+            resolved = enrich_reddit_installed_batch(source, unresolved, context)
+            unresolved = [
+                item for item in unresolved
+                if str(item.get("id") or canonical_url(item["url"])) not in resolved
+            ]
+        except (AccessBlocked, RuntimeError, ConfigError) as exc:
+            oauth_error = exc
+
+    browser_error: Exception | None = None
+    try:
+        records = browser_evidence_records(source, context)
+        by_url = {canonical_url(str(record.get("url") or "")): record for record in records if record.get("url")}
+        still_unresolved = []
+        for item in unresolved:
+            record = by_url.get(canonical_url(str(item.get("url") or "")))
+            if record is None:
+                still_unresolved.append(item)
+                continue
+            apply_social_evidence(item, record)
+        unresolved = still_unresolved
+    except (OSError, json.JSONDecodeError, ConfigError) as exc:
+        browser_error = exc
+
+    failures = [error for error in (oauth_error, browser_error) if error is not None]
+    detail = "; ".join(clean_text(str(error), 180) for error in failures)
+    for item in unresolved:
+        item["_raw_score"] = -1.0
+        item["metric_verification"] = {
+            "status": "blocked", "captured_at": iso_z(now_utc()), "provenance": "anonymous_discovery",
+            "detail": detail or "Reddit RSS is discovery-only; exact score/comments require Installed-App OAuth or browser evidence",
+        }
+
+
+def enrich_rss_details(source: dict[str, Any], results: list[dict[str, Any]], context: dict[str, Any]) -> None:
     mode = str(source.get("detail_enrichment") or "").strip().lower()
     if not mode:
+        return
+    if mode == "reddit_fallback":
+        enrich_reddit_fallback(source, results, context)
         return
     enrichers: dict[str, Callable[[dict[str, Any], int], None]] = {
         "youtube_public": enrich_youtube_public,
@@ -1503,7 +1858,7 @@ def enrich_rss_details(source: dict[str, Any], results: list[dict[str, Any]], ti
         raise ConfigError(f"unsupported rss detail_enrichment: {mode}")
     def enrich_one(item: dict[str, Any]) -> None:
         try:
-            enricher(item, timeout)
+            enricher(item, context["timeout"])
         except AccessBlocked as exc:
             item["_raw_score"] = -1.0
             item["metric_verification"] = {
@@ -1603,7 +1958,7 @@ def collect_rss(source: dict[str, Any], context: dict[str, Any]) -> list[dict[st
             key=lambda item: (item.get("_raw_score", 0.0), item.get("published_at") or ""),
             reverse=True,
         )[:detail_limit]
-    enrich_rss_details(source, results, context["timeout"])
+    enrich_rss_details(source, results, context)
     for item in results:
         item.pop("_heat_thresholds", None)
     # Raw discovery deliberately keeps metric failures and sub-threshold posts.
@@ -1651,6 +2006,7 @@ COLLECTORS: dict[str, Callable[[dict[str, Any], dict[str, Any]], list[dict[str, 
     "rss": collect_rss,
     "manual": collect_manual,
     "web_html": collect_web_html,
+    "instagram_fallback": collect_instagram_fallback,
     "instructables_web": collect_instructables_web,
     "kickstarter_kicktraq": collect_kickstarter_kicktraq,
     "indiegogo_public": collect_indiegogo_public,
@@ -1781,7 +2137,7 @@ def collect_raw_envelope(config_path: Path, as_of: datetime, source_ids: set[str
             if detail_failures:
                 blocked = any(value == "blocked" for value in verification)
                 status = "blocked" if blocked else "error"
-                detail = "discovery succeeded but every public metric detail request failed"
+                detail = "discovery succeeded but every approved metric evidence path was unavailable"
             else:
                 status = "ok" if raw_items else "empty"
                 detail = ""

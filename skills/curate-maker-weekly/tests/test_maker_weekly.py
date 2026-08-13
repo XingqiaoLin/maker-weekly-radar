@@ -334,6 +334,107 @@ class MakerWeeklyTests(unittest.TestCase):
             with self.assertRaises(maker_weekly.AccessBlocked):
                 maker_weekly.enrich_reddit_public(item, 10)
 
+    def test_reddit_installed_app_oauth_uses_no_client_secret_and_batches_metrics(self):
+        source = {
+            "id": "reddit-rss", "type": "rss", "platform": "Reddit",
+            "installed_client_id": "approved-public-client", "user_agent": "desktop:maker-weekly:v0.11 (by /u/testmaintainer)",
+        }
+        context = {"timeout": 10}
+        items = [{
+            "id": "candidate", "url": "https://www.reddit.com/r/maker/comments/post123/machine/",
+            "metrics": {}, "evidence": [],
+        }]
+        token = {"access_token": "short-lived-token"}
+        listing = {"data": {"children": [{"data": {
+            "id": "post123", "score": 470, "num_comments": 45, "author": "actual_maker",
+            "selftext": "I designed, fabricated, assembled and tested this working machine.",
+            "url_overridden_by_dest": "https://i.redd.it/machine.jpg",
+        }}]}}
+        with mock.patch.object(maker_weekly, "request_json", side_effect=[token, listing]) as request:
+            resolved = maker_weekly.enrich_reddit_installed_batch(source, items, context)
+        token_call, listing_call = request.call_args_list
+        self.assertEqual(token_call.args[0], "https://www.reddit.com/api/v1/access_token")
+        self.assertIn(b"grants%2Finstalled_client", token_call.kwargs["data"])
+        self.assertEqual(token_call.kwargs["headers"]["Authorization"], "Basic YXBwcm92ZWQtcHVibGljLWNsaWVudDo=")
+        self.assertIn("id=t3_post123", listing_call.args[0])
+        self.assertEqual(items[0]["metrics"], {"score": 470, "comments": 45})
+        self.assertEqual(items[0]["metric_verification"]["provenance"], "reddit_oauth")
+        self.assertEqual(resolved, {"candidate"})
+
+    def test_reddit_fallback_accepts_audited_browser_evidence(self):
+        with tempfile.TemporaryDirectory() as raw_dir:
+            evidence_path = Path(raw_dir) / "social-evidence.json"
+            evidence_path.write_text(json.dumps({"items": [{
+                "platform": "Reddit", "title": "I built a machine",
+                "url": "https://www.reddit.com/r/maker/comments/post123/machine/",
+                "source_url": "https://www.reddit.com/r/maker/comments/post123/machine/",
+                "provenance": "browser_visible", "captured_at": "2026-08-12T10:00:00Z",
+                "metrics": {"score": 480, "comments": 30},
+            }]}), encoding="utf-8")
+            source = {"id": "reddit-rss", "platform": "Reddit", "browser_evidence_file": str(evidence_path)}
+            context = {"timeout": 10, "config_dir": Path(raw_dir)}
+            item = {"id": "candidate", "url": "https://www.reddit.com/r/maker/comments/post123/machine/", "metrics": {}, "evidence": []}
+            maker_weekly.enrich_reddit_fallback(source, [item], context)
+        self.assertEqual(item["metrics"], {"score": 480, "comments": 30})
+        self.assertEqual(item["metric_verification"]["provenance"], "browser_visible")
+
+    def test_reddit_anonymous_discovery_never_becomes_verified_heat(self):
+        source = {"id": "reddit-rss", "platform": "Reddit"}
+        context = {"timeout": 10, "config_dir": Path(".")}
+        item = {"id": "candidate", "url": "https://www.reddit.com/r/maker/comments/post123/machine/", "metrics": {}, "evidence": []}
+        with mock.patch.dict(maker_weekly.os.environ, {}, clear=True):
+            maker_weekly.enrich_reddit_fallback(source, [item], context)
+        self.assertEqual(item["metric_verification"]["status"], "blocked")
+        self.assertEqual(item["metric_verification"]["provenance"], "anonymous_discovery")
+        self.assertNotIn("score", item["metrics"])
+
+    def test_instagram_fallback_uses_graph_relay_evidence(self):
+        source = {
+            "id": "instagram-web", "type": "instagram_fallback", "platform": "Instagram",
+            "relay_url": "https://relay.example.test/social", "hashtags": ["makerproject"],
+        }
+        context = {
+            "timeout": 10, "limit": 10, "config_dir": Path("."),
+            "since": datetime(2026, 8, 3, tzinfo=timezone.utc),
+            "as_of": datetime(2026, 8, 9, 23, 59, 59, tzinfo=timezone.utc),
+        }
+        response = {"items": [{
+            "platform": "Instagram", "title": "Printed kinetic sculpture",
+            "url": "https://www.instagram.com/p/ABC123/", "source_url": "https://graph.facebook.com/v23.0/media123",
+            "provenance": "instagram_graph", "published_at": "2026-08-07T10:00:00Z",
+            "captured_at": "2026-08-12T10:00:00Z", "metrics": {"likes": 4900, "comments": 200},
+            "author": "small_maker",
+        }]}
+        with mock.patch.dict(maker_weekly.os.environ, {}, clear=True), \
+                mock.patch.object(maker_weekly, "request_json", return_value=response) as request:
+            items = maker_weekly.collect_instagram_fallback(source, context)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["metrics"], {"likes": 4900, "comments": 200})
+        self.assertEqual(items[0]["metric_verification"]["provenance"], "instagram_graph")
+        self.assertEqual(request.call_args.kwargs["headers"]["Content-Type"], "application/json")
+
+    def test_instagram_anonymous_html_is_discovery_only(self):
+        source = {"id": "instagram-web", "type": "instagram_fallback", "platform": "Instagram"}
+        context = {"timeout": 10, "config_dir": Path(".")}
+        discovery = {
+            "id": "candidate", "url": "https://www.instagram.com/p/ABC123/", "metrics": {"likes": 99999, "comments": 999},
+            "metrics_captured_at": "2026-08-12T10:00:00Z", "evidence": [], "_raw_score": 100998,
+        }
+        with mock.patch.dict(maker_weekly.os.environ, {}, clear=True), \
+                mock.patch.object(maker_weekly, "collect_web_html", return_value=[discovery]):
+            items = maker_weekly.collect_instagram_fallback(source, context)
+        self.assertEqual(items[0]["metrics"], {})
+        self.assertIsNone(items[0]["metrics_captured_at"])
+        self.assertEqual(items[0]["metric_verification"]["status"], "blocked")
+
+    def test_instagram_empty_javascript_shell_is_blocked_not_empty(self):
+        source = {"id": "instagram-web", "type": "instagram_fallback", "platform": "Instagram"}
+        context = {"timeout": 10, "config_dir": Path(".")}
+        with mock.patch.dict(maker_weekly.os.environ, {}, clear=True), \
+                mock.patch.object(maker_weekly, "collect_web_html", side_effect=RuntimeError("listing returned no matching public project links; it may require JavaScript or login")):
+            with self.assertRaises(maker_weekly.AccessBlocked):
+                maker_weekly.collect_instagram_fallback(source, context)
+
     def test_rss_detail_failure_preserves_candidate_as_unknown(self):
         feed = b"""<feed xmlns='http://www.w3.org/2005/Atom'><entry><title>Maker video</title><link href='https://www.youtube.com/watch?v=abc123_X'/><published>2026-08-06T00:00:00Z</published></entry></feed>"""
         source = {
@@ -664,6 +765,8 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertTrue(by_id["kickstarter"]["enabled"])
         self.assertTrue(by_id["youtube-rss"]["enabled"])
         self.assertTrue(by_id["reddit-rss"]["enabled"])
+        self.assertEqual(by_id["reddit-rss"]["detail_enrichment"], "reddit_fallback")
+        self.assertEqual(by_id["instagram-web"]["type"], "instagram_fallback")
         self.assertNotIn("required_patterns", by_id["youtube-rss"])
         self.assertNotIn("required_patterns", by_id["reddit-rss"])
         self.assertGreaterEqual(len(by_id["youtube-rss"]["feed_urls"]), 29)
@@ -672,6 +775,16 @@ class MakerWeeklyTests(unittest.TestCase):
             bundle = url.split("/r/", 1)[1].split("/top/", 1)[0]
             reddit_communities.update(bundle.split("+"))
         self.assertGreaterEqual(len(reddit_communities), 20)
+
+    def test_social_evidence_rejects_search_snippet_or_third_party_metrics(self):
+        record = {
+            "platform": "Instagram", "title": "Maker project",
+            "url": "https://www.instagram.com/p/ABC123/", "source_url": "https://search.example.test/result",
+            "provenance": "browser_visible", "captured_at": "2026-08-12T10:00:00Z",
+            "metrics": {"likes": 6000, "comments": 100},
+        }
+        with self.assertRaises(maker_weekly.ConfigError):
+            maker_weekly.validate_social_evidence_record(record, "Instagram", require_title=True)
 
     def test_github_physical_gate_reads_raw_readme_without_detail_api(self):
         readme = b"""# Working Robot\nWe designed and built a working robot device from scratch.\n## Hardware build\nWe printed the enclosure, soldered the sensor circuit, assembled motors, tested the prototype, and iterated.\n![running robot](images/robot.jpg)\n"""

@@ -18,11 +18,33 @@ Use YouTube Data API v3 `search.list`, followed by `videos.list` for public stat
 
 ### `reddit`
 
-Use Reddit OAuth client credentials and the authenticated `/top` listing. Set `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET`, use a truthful `user_agent`, and obtain approval for the intended Data API use. This remains the broadest discovery mode. The no-account RSS mode described below can verify a bounded shortlist on public old-Reddit post pages without bypassing a challenge.
+Use Reddit OAuth client credentials and the authenticated `/top` listing. Set `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET`, use a truthful `user_agent`, and obtain approval for the intended Data API use. For public desktop distribution, prefer an approved Installed App: put its non-secret client ID in `installed_client_id` or `REDDIT_INSTALLED_CLIENT_ID`; the collector requests application-only OAuth and batches shortlisted post IDs through `oauth.reddit.com/api/info`. Never commit a confidential client secret. The formal RSS profile treats anonymous pages as discovery-only.
 
 ### `instagram`
 
-Use the Instagram Graph API hashtag discovery and top-media endpoints. Set `INSTAGRAM_ACCESS_TOKEN` and `INSTAGRAM_USER_ID`. Access depends on account type, permissions, API version, and Meta review status. If access is unavailable, use an authorized `manual` export.
+Use the Instagram Graph API hashtag discovery and top-media endpoints. Set `INSTAGRAM_ACCESS_TOKEN` and `INSTAGRAM_USER_ID`. The formal `instagram_fallback` provider tries direct Graph access, an optional evidence relay, audited browser evidence, then anonymous HTML discovery. Configure a relay with `MAKER_WEEKLY_SOCIAL_RELAY_URL` and optionally `MAKER_WEEKLY_SOCIAL_RELAY_TOKEN`; it accepts a JSON request containing `platform`, `since`, `as_of`, `limit`, `urls`, and `hashtags`, and returns `{ "items": [...] }` in the browser-evidence shape below. Access depends on account type, permissions, API version, and Meta review status.
+
+### Audited browser evidence
+
+Set `MAKER_WEEKLY_BROWSER_EVIDENCE` to an absolute JSON path after Codex has opened an original Reddit or Instagram post in a browser. This bridge is for visible original-platform facts, not search snippets or estimates:
+
+```json
+{
+  "items": [{
+    "platform": "Reddit",
+    "title": "I built a physical machine",
+    "url": "https://www.reddit.com/r/maker/comments/POST_ID/project/",
+    "source_url": "https://www.reddit.com/r/maker/comments/POST_ID/project/",
+    "provenance": "browser_visible",
+    "published_at": "2026-08-07T10:00:00Z",
+    "captured_at": "2026-08-12T10:00:00Z",
+    "metrics": {"score": 480, "comments": 30},
+    "author": "actual_maker"
+  }]
+}
+```
+
+Instagram records require numeric `likes` and `comments`; Reddit records require numeric `score` and `comments`. `url` and `source_url` must be hosted by the original platform. Allowed provenance values are `browser_visible`, `instagram_graph`, `reddit_oauth`, and `official_api`. Hidden or missing metrics fail validation. Include `physical_evidence` when the browser also captured direct build proof.
 
 ### `kickstarter_kicktraq`
 
@@ -44,7 +66,7 @@ Attempt anonymous discovery from one or more official listing pages, extract onl
 
 Use RSS or Atom without secrets. Set `feed_url` for one feed or `feed_urls` to merge several feeds into one platform-level source before applying the Top 5 limit. `static_metrics` may be used only when the feed URL itself proves the property—for example Hackster's `by=featured` feed may set `featured: true`. This supports discovery from Hackster Featured, curated YouTube channels, subreddit feeds, and editorial publications.
 
-For no-account YouTube, set `detail_enrichment: youtube_public`. The formal default bundles at least 29 verified Maker/engineering channel feeds, normalizes video and Shorts links, and records visible video views and channel subscribers. For no-account Reddit, set `detail_enrichment: reddit_old`; use a small number of multi-subreddit RSS bundles to cover at least 20 communities without triggering one anonymous request per community. Preserve the RSS-embedded author, post text, image/video URLs, and process language. Percent-encode Unicode post paths before public requests. Verify score and comments on old Reddit first; when either value is missing or the HTML path fails, try the canonical post JSON, old-host JSON, short `/comments/ID.json`, and `api.reddit.com/comments/ID` public representations. Mark the item failed only when all bounded public representations fail. Respect HTTP 429 and `Retry-After`; use bounded retries and a small configured pause rather than bypassing limits. The formal default deliberately does not use title-only Maker filters.
+For no-account YouTube, set `detail_enrichment: youtube_public`. The formal default bundles at least 29 verified Maker/engineering channel feeds, normalizes video and Shorts links, and records visible video views and channel subscribers. For Reddit, use `detail_enrichment: reddit_fallback` with a small number of multi-subreddit RSS bundles covering at least 20 communities. It preserves RSS author, text, image/video URLs, and process language, then tries Installed-App OAuth and audited browser evidence for exact heat. Without either, every item remains `blocked`; RSS order and anonymous HTML/JSON are discovery-only. The legacy `reddit_old` mode retains bounded Unicode-safe old-page/JSON diagnostics for custom profiles but is not formal heat evidence. Respect HTTP 429 and `Retry-After`; never bypass limits. The formal default deliberately does not use title-only Maker filters.
 
 Use the expanded verified default: YouTube reaches 25,000 views or 10,000 channel subscribers; Reddit score plus comments reaches 500; Kickstarter reaches US$5,000 or 50 backers. These gates expand editorial research only; keep all physical, time, authorship, process, and final editorial gates unchanged.
 

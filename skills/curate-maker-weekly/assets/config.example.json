@@ -78,7 +78,9 @@
       "type": "rss",
       "enabled": true,
       "platform": "Reddit",
-      "detail_enrichment": "reddit_old",
+      "detail_enrichment": "reddit_fallback",
+      "installed_client_id_env": "REDDIT_INSTALLED_CLIENT_ID",
+      "browser_evidence_env": "MAKER_WEEKLY_BROWSER_EVIDENCE",
       "detail_candidate_limit": 80,
       "detail_workers": 6,
       "feed_pause_seconds": 1,
@@ -149,9 +151,15 @@
     },
     {
       "id": "instagram-web",
-      "type": "web_html",
+      "type": "instagram_fallback",
       "enabled": true,
       "platform": "Instagram",
+      "access_token_env": "INSTAGRAM_ACCESS_TOKEN",
+      "user_id_env": "INSTAGRAM_USER_ID",
+      "relay_url_env": "MAKER_WEEKLY_SOCIAL_RELAY_URL",
+      "relay_token_env": "MAKER_WEEKLY_SOCIAL_RELAY_TOKEN",
+      "browser_evidence_env": "MAKER_WEEKLY_BROWSER_EVIDENCE",
+      "hashtags": ["makerproject", "diyhardware", "3dprinting", "robotics"],
       "listing_urls": [
         "https://www.instagram.com/explore/tags/makerproject/",
         "https://www.instagram.com/explore/tags/diyhardware/"

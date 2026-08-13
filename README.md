@@ -10,7 +10,7 @@ It searches 13 public platforms, preserves raw discoveries for audit, requires d
 - Collect from Kickstarter, Indiegogo, GitHub, Hackaday, Hackster, Instructables, YouTube, Reddit, X, Instagram, Make Magazine, The Verge, and Tom's Hardware.
 - Use public no-key collection where it is reliable, with optional official API providers.
 - Avoid per-repository GitHub README API calls, use 29+ verified YouTube channel feeds, cover 20+ Reddit communities through rate-limit-friendly bundles, and use official Kickstarter update feeds when campaign pages are challenged.
-- Accept project media plus documented multi-step fabrication as built-result evidence, and verify Reddit heat through Unicode-safe old-page/JSON fallback paths.
+- Accept project media plus documented multi-step fabrication as built-result evidence, and verify Reddit heat through approved Installed-App OAuth or audited original-page browser evidence.
 - Bound eligibility by the project's first-publication week while observing heat at report execution time, with the real metric capture timestamp preserved.
 - Verify public heat metrics instead of treating feed position as popularity.
 - Reject old projects even when they were updated, resurfaced, or crossed a heat threshold this week.
@@ -43,7 +43,9 @@ python3 skills/curate-maker-weekly/scripts/maker_weekly.py run \
   --output-dir output
 ```
 
-The bundled default is a zero-credential profile. It automatically reuses `GITHUB_TOKEN`, `GH_TOKEN`, or an existing `gh auth` login when present, but none is required to start. Reddit and YouTube use RSS/public-page paths by default; X and Instagram use bounded anonymous public-page attempts. A blocked platform is reported as incomplete coverage without stopping successful sources. Pass `--config maker-weekly.json` only for an optional custom or credentialed provider profile.
+The bundled default starts without credentials. It automatically reuses `GITHUB_TOKEN`, `GH_TOKEN`, or an existing `gh auth` login when present. Reddit uses RSS discovery followed by an optional approved Installed-App OAuth client ID or audited browser evidence; Instagram tries direct Graph access, an optional evidence relay, audited browser evidence, then anonymous discovery. Anonymous Reddit/Instagram pages never pass the heat gate by themselves. A blocked platform is reported as incomplete coverage without stopping successful sources. Pass `--config maker-weekly.json` only for a custom profile.
+
+For a Codex browser fallback, save exact original-page observations in `social-evidence.json`, set `MAKER_WEEKLY_BROWSER_EVIDENCE` to its absolute path, and rerun. The schema and validation rules are in `skills/curate-maker-weekly/references/providers.md`. For a zero-API-knowledge Instagram deployment, the maintainer may set `MAKER_WEEKLY_SOCIAL_RELAY_URL`; access tokens remain on the approved relay and never enter the public repository.
 
 This writes `raw-discoveries.json`, `physical-candidates.json`, `researched.json`, and an explicitly non-publishable raw audit report. Only strict validated selections may become `final.json`.
 
