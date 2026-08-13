@@ -492,6 +492,63 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertEqual(coverage["successful_feeds"], 1)
         self.assertEqual(coverage["failed_feeds"], 0)
 
+    def test_youtube_channel_page_fallback_recovers_failed_feed_with_exact_watch_date(self):
+        feed_url = "https://www.youtube.com/feeds/videos.xml?channel_id=UCabcdefghijklmnopqrstuv"
+        channel_page = b'''<html><script>var ytInitialData = {"contentType":"LOCKUP_CONTENT_TYPE_VIDEO","contentId":"abc123_XYZ0","metadata":{"lockupMetadataViewModel":{"title":{"content":"I built a robot"}}}};</script></html>'''
+        watch_page = b'''<html><head><title>I built a robot</title><meta name="description" content="Designed, assembled and tested robot"></head><body>
+        <script>"publishDate":"2026-08-07T10:00:00Z","videoDetails":{"viewCount":"50000"},"subscriberCountText":{"simpleText":"20K subscribers"}</script></body></html>'''
+        source = {
+            "id": "youtube-rss", "type": "rss", "platform": "YouTube", "feed_url": feed_url,
+            "detail_enrichment": "youtube_public", "detail_workers": 1,
+            "feed_recovery_rounds": 0, "youtube_channel_page_fallback": True,
+            "youtube_page_fallback_pause_seconds": 0,
+        }
+        context = {
+            "timeout": 10, "limit": 5, "since": datetime(2026, 8, 3, tzinfo=timezone.utc),
+            "as_of": datetime(2026, 8, 9, 23, 59, 59, tzinfo=timezone.utc),
+            "lookback_days": 7, "keywords": [],
+        }
+        with mock.patch.object(
+            maker_weekly, "request_bytes",
+            side_effect=[maker_weekly.ResourceNotFound("404"), maker_weekly.ResourceNotFound("404"), channel_page, watch_page],
+        ) as request, mock.patch.object(maker_weekly.time, "sleep"):
+            items = maker_weekly.collect_rss(source, context)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["published_at"], "2026-08-07T10:00:00Z")
+        self.assertEqual(items[0]["metrics"]["views"], 50000)
+        self.assertEqual(items[0]["metric_verification"]["provenance"], "youtube_official_channel_page_fallback")
+        self.assertEqual(request.call_count, 4)
+        coverage = context["_source_diagnostics"]["youtube-rss"]["feed_coverage"]
+        self.assertEqual(coverage["successful_feeds"], 1)
+        self.assertEqual(coverage["rss_successful_feeds"], 0)
+        self.assertEqual(coverage["page_fallback_succeeded"], 1)
+
+        status, detail = maker_weekly.source_collection_outcome(items, context["_source_diagnostics"]["youtube-rss"])
+        self.assertEqual(status, "ok")
+        self.assertIn("discovery targets 1/1 succeeded", detail)
+        self.assertIn("channel-page fallback 1/1 succeeded", detail)
+        self.assertNotIn("RSS feeds 1/1 succeeded", detail)
+
+    def test_youtube_channel_page_fallback_fails_closed_without_exact_date(self):
+        feed_url = "https://www.youtube.com/feeds/videos.xml?channel_id=UCabcdefghijklmnopqrstuv"
+        channel_page = b'''<script>var ytInitialData = {"contentType":"LOCKUP_CONTENT_TYPE_VIDEO","contentId":"abc123_XYZ0","metadata":{"lockupMetadataViewModel":{"title":{"content":"Robot"}}}};</script>'''
+        watch_page = b'''<html><script>"videoDetails":{"viewCount":"50000"}</script></html>'''
+        source = {
+            "id": "youtube-rss", "type": "rss", "platform": "YouTube", "feed_url": feed_url,
+            "feed_recovery_rounds": 0, "youtube_channel_page_fallback": True,
+        }
+        context = {
+            "timeout": 10, "limit": 5, "since": datetime(2026, 8, 3, tzinfo=timezone.utc),
+            "as_of": datetime(2026, 8, 9, 23, 59, 59, tzinfo=timezone.utc),
+            "lookback_days": 7, "keywords": [],
+        }
+        with mock.patch.object(
+            maker_weekly, "request_bytes",
+            side_effect=[maker_weekly.ResourceNotFound("404"), maker_weekly.ResourceNotFound("404"), channel_page, watch_page],
+        ), mock.patch.object(maker_weekly.time, "sleep"):
+            with self.assertRaises(RuntimeError):
+                maker_weekly.collect_rss(source, context)
+
     def test_request_bytes_retries_incomplete_response(self):
         partial = http.client.IncompleteRead(b"partial", 100)
         response = mock.MagicMock()
@@ -1161,8 +1218,9 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertNotIn("required_patterns", by_id["reddit-rss"])
         self.assertGreaterEqual(len(by_id["youtube-rss"]["feed_urls"]), 29)
         self.assertGreater(by_id["youtube-rss"]["feed_pause_seconds"], 0)
-        self.assertGreaterEqual(by_id["youtube-rss"]["feed_recovery_rounds"], 1)
-        self.assertLessEqual(by_id["youtube-rss"]["detail_workers"], 3)
+        self.assertGreaterEqual(by_id["youtube-rss"]["feed_recovery_rounds"], 2)
+        self.assertLessEqual(by_id["youtube-rss"]["detail_workers"], 2)
+        self.assertTrue(by_id["youtube-rss"]["youtube_channel_page_fallback"])
         self.assertGreaterEqual(by_id["reddit-rss"]["feed_pause_seconds"], 2)
         self.assertGreaterEqual(by_id["reddit-rss"]["feed_recovery_rounds"], 2)
         self.assertLessEqual(by_id["reddit-rss"]["detail_workers"], 2)

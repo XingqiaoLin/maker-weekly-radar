@@ -34,7 +34,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-USER_AGENT = "maker-weekly-radar/0.16"
+USER_AGENT = "maker-weekly-radar/0.17"
+YOUTUBE_BROWSER_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0 Safari/537.36"
+)
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "assets" / "config.example.json"
 HEAT_THRESHOLDS = {
     "kickstarter": {"usd_pledged": 5_000, "backers": 50},
@@ -1691,6 +1695,134 @@ def youtube_watch_url(value: str) -> str:
     return f"https://www.youtube.com/watch?v={video_id}"
 
 
+def youtube_channel_id_from_feed(value: str) -> str:
+    parsed = urllib.parse.urlsplit(value)
+    channel_id = urllib.parse.parse_qs(parsed.query).get("channel_id", [""])[0]
+    if (
+        (parsed.hostname or "").lower() not in {"youtube.com", "www.youtube.com"}
+        or parsed.path != "/feeds/videos.xml"
+        or not re.fullmatch(r"UC[A-Za-z0-9_-]{20,30}", channel_id)
+    ):
+        return ""
+    return channel_id
+
+
+def json_after_marker(page: str, marker: str) -> Any:
+    position = page.find(marker)
+    if position < 0:
+        raise RuntimeError(f"YouTube page omitted {marker.strip()}")
+    return json.JSONDecoder().raw_decode(page[position + len(marker):].lstrip())[0]
+
+
+def youtube_channel_video_cards(page: str) -> list[dict[str, str]]:
+    data = json_after_marker(page, "var ytInitialData = ")
+    cards: list[dict[str, str]] = []
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            video_id = value.get("contentId")
+            if value.get("contentType") == "LOCKUP_CONTENT_TYPE_VIDEO" and isinstance(video_id, str):
+                metadata = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
+                lockup = metadata.get("lockupMetadataViewModel") if isinstance(metadata.get("lockupMetadataViewModel"), dict) else {}
+                title = clean_text((lockup.get("title") or {}).get("content"), 300) if isinstance(lockup.get("title"), dict) else ""
+                if title and re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+                    cards.append({"video_id": video_id, "title": title})
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(data)
+    unique: dict[str, dict[str, str]] = {}
+    for card in cards:
+        unique.setdefault(card["video_id"], card)
+    return list(unique.values())
+
+
+def youtube_watch_discovery(video_id: str, timeout: int) -> dict[str, Any]:
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    raw = request_bytes(url, timeout, headers={
+        "Accept": "text/html,application/xhtml+xml", "User-Agent": YOUTUBE_BROWSER_UA,
+        "Accept-Language": "en-US,en;q=0.9",
+    })
+    parser, page = parse_public_page(raw)
+    published_match = re.search(r'"(?:publishDate|uploadDate)":"([^"]+)"', page)
+    published = parse_datetime(published_match.group(1)) if published_match else None
+    if published is None:
+        raise RuntimeError("YouTube watch page omitted an exact publication date")
+    metadata = public_page_metadata(parser, url)
+    view_match = re.search(r'"videoDetails":\{.*?"viewCount":"([0-9]+)"', page, flags=re.DOTALL)
+    if view_match is None:
+        view_match = re.search(r'"viewCount":"([0-9]+)"', page)
+    subscriber_match = re.search(
+        r'"subscriberCountText":\{.*?"simpleText":"([0-9][0-9.,]*\s*[KMB]?)\s+subscribers?"',
+        page, flags=re.IGNORECASE | re.DOTALL,
+    )
+    metrics: dict[str, int] = {}
+    if view_match:
+        metrics["views"] = int(view_match.group(1))
+    if subscriber_match:
+        subscribers = compact_number(subscriber_match.group(1))
+        if subscribers is not None:
+            metrics["channel_subscribers"] = int(subscribers)
+    return {
+        "url": url, "published_at": published,
+        "title": metadata.get("title"), "summary": metadata.get("summary"),
+        "author": metadata.get("author"), "metrics": metrics,
+        "captured_at": iso_z(now_utc()),
+        "physical_page": {
+            "source_url": url,
+            "text": f"{metadata['title']} {metadata['summary']} {metadata['visible_text']}",
+            "media_urls": page_media_urls(parser, page, url),
+            "structured_steps": len(re.findall(r"\b(build|built|making|fabricat|assembl|solder|test|iterat)\w*\b", page, flags=re.IGNORECASE)),
+            "author": metadata.get("author"),
+        },
+    }
+
+
+def youtube_channel_page_feed(feed_url: str, context: dict[str, Any], source: dict[str, Any]) -> ET.Element:
+    """Build a bounded synthetic Atom root from official channel/watch pages."""
+    channel_id = youtube_channel_id_from_feed(feed_url)
+    if not channel_id:
+        raise RuntimeError("not an official YouTube channel feed")
+    page_url = f"https://www.youtube.com/channel/{channel_id}/videos"
+    raw = request_bytes(page_url, context["timeout"], headers={
+        "Accept": "text/html,application/xhtml+xml", "User-Agent": YOUTUBE_BROWSER_UA,
+        "Accept-Language": "en-US,en;q=0.9",
+    })
+    _, page = parse_public_page(raw)
+    cards = youtube_channel_video_cards(page)
+    if not cards:
+        raise RuntimeError("YouTube channel page exposed no video cards")
+    limit = max(5, min(30, int(source.get("youtube_page_fallback_video_limit") or 15)))
+    root = ET.Element("feed")
+    saw_older = False
+    consecutive_older = 0
+    for card in cards[:limit]:
+        detail = youtube_watch_discovery(card["video_id"], context["timeout"])
+        context.setdefault("_youtube_watch_discoveries", {})[detail["url"]] = detail
+        published = detail["published_at"]
+        if published < context["since"]:
+            consecutive_older += 1
+            saw_older = True
+            if consecutive_older >= 2:
+                break
+            continue
+        consecutive_older = 0
+        if published > context["as_of"]:
+            continue
+        entry = ET.SubElement(root, "entry")
+        ET.SubElement(entry, "title").text = detail.get("title") or card["title"]
+        ET.SubElement(entry, "link", {"href": detail["url"]})
+        ET.SubElement(entry, "published").text = iso_z(published)
+        ET.SubElement(entry, "summary").text = detail.get("summary") or ""
+        ET.SubElement(entry, "author").text = detail.get("author") or ""
+    if len(cards) >= limit and not saw_older:
+        raise RuntimeError("YouTube channel fallback bound ended before reaching older videos")
+    return root
+
+
 def enrich_youtube_public(item: dict[str, Any], timeout: int) -> None:
     detail_url = youtube_watch_url(str(item.get("url") or ""))
     raw = request_bytes(detail_url, timeout, headers={"Accept": "text/html,application/xhtml+xml"})
@@ -1964,6 +2096,8 @@ def enrich_rss_details(source: dict[str, Any], results: list[dict[str, Any]], co
     if enricher is None:
         raise ConfigError(f"unsupported rss detail_enrichment: {mode}")
     def enrich_one(item: dict[str, Any]) -> None:
+        if item.get("metric_verification", {}).get("status") == "ok":
+            return
         try:
             enricher(item, context["timeout"])
         except AccessBlocked as exc:
@@ -2010,6 +2144,9 @@ def collect_rss(source: dict[str, Any], context: dict[str, Any]) -> list[dict[st
         "success_ratio": 0.0,
         "recovery_rounds": 0,
         "recovered_feeds": 0,
+        "page_fallback_attempted": 0,
+        "page_fallback_succeeded": 0,
+        "rss_successful_feeds": 0,
         "failures": [],
     }
     context.setdefault("_source_diagnostics", {})[str(source["id"])] = {"feed_coverage": coverage}
@@ -2064,6 +2201,23 @@ def collect_rss(source: dict[str, Any], context: dict[str, Any]) -> list[dict[st
             if not retry_urls:
                 break
 
+    coverage["rss_successful_feeds"] = len(parsed_feeds)
+    if retry_urls and source.get("youtube_channel_page_fallback") is True:
+        fallback_pause = min(10.0, max(0.0, float(source.get("youtube_page_fallback_pause_seconds") or 1)))
+        for index, feed_url in enumerate(list(retry_urls)):
+            if not youtube_channel_id_from_feed(feed_url):
+                continue
+            coverage["page_fallback_attempted"] += 1
+            try:
+                parsed_feeds[feed_url] = youtube_channel_page_feed(feed_url, context, source)
+                failures_by_url.pop(feed_url, None)
+                coverage["page_fallback_succeeded"] += 1
+            except (RuntimeError, ET.ParseError) as exc:
+                failures_by_url[feed_url] = provider_failure_record(feed_url, exc)
+            if fallback_pause > 0 and index + 1 < len(retry_urls):
+                time.sleep(fallback_pause)
+        retry_urls = [url for url in retry_urls if url in failures_by_url]
+
     for feed_url in urls:
         root = parsed_feeds.get(feed_url)
         if root is None:
@@ -2106,6 +2260,22 @@ def collect_rss(source: dict[str, Any], context: dict[str, Any]) -> list[dict[st
             )
             if item:
                 item["_heat_thresholds"] = resolve_heat_thresholds(context.get("heat_thresholds"))
+                cached_watch = context.get("_youtube_watch_discoveries", {}).get(link)
+                if isinstance(cached_watch, dict) and cached_watch.get("metrics"):
+                    item["metrics"].update(cached_watch["metrics"])
+                    item["metrics_captured_at"] = cached_watch["captured_at"]
+                    item["metric_verification"] = {
+                        "status": "ok", "source_url": link,
+                        "captured_at": cached_watch["captured_at"],
+                        "provenance": "youtube_official_channel_page_fallback",
+                        "ranking_basis": "views/25000 + channel_subscribers/10000",
+                    }
+                    merge_physical_page(item, cached_watch["physical_page"])
+                    threshold = resolve_heat_thresholds(context.get("heat_thresholds"))["youtube"]
+                    item["_raw_score"] = (
+                        float(item["metrics"].get("views") or 0) / threshold["views"]
+                        + float(item["metrics"].get("channel_subscribers") or 0) / threshold["channel_subscribers"]
+                    )
                 rss_media = rss_entry_media_urls(entry, summary)
                 merge_physical_page(item, {
                     "source_url": link,
@@ -2307,7 +2477,13 @@ def source_collection_outcome(
         succeeded = int(feed.get("successful_feeds") or 0)
         total = int(feed.get("total_feeds") or 0)
         failed = int(feed.get("failed_feeds") or 0)
-        details.append(f"RSS feeds {succeeded}/{total} succeeded")
+        page_fallback = int(feed.get("page_fallback_succeeded") or 0)
+        page_attempted = int(feed.get("page_fallback_attempted") or 0)
+        if page_fallback:
+            details.append(f"YouTube discovery targets {succeeded}/{total} succeeded")
+            details.append(f"official channel-page fallback {page_fallback}/{page_attempted} succeeded")
+        else:
+            details.append(f"RSS feeds {succeeded}/{total} succeeded")
         if failed:
             status = "error"
 
