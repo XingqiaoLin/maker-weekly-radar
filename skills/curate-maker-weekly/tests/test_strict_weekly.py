@@ -264,6 +264,51 @@ class StrictWeeklyTests(unittest.TestCase):
         self.assertEqual(shortfalls["hackaday"]["eligible"], 0)
         self.assertEqual(strict_weekly.validate_final(final), [])
 
+    def test_source_shortfall_still_enforces_instructables_default_maximum(self):
+        specs = [("YouTube", 2), ("Reddit", 2), ("Hackaday", 1), ("Instructables", 6)]
+        candidates, decisions = [], []
+        index = 0
+        for platform, count in specs:
+            for _ in range(count):
+                candidate, decision = self.strict_candidate_and_decision(index, platform, 4)
+                candidates.append(candidate); decisions.append(decision); index += 1
+        researched = {
+            "week": {"start": "2026-08-03T00:00:00Z", "end": "2026-08-09T23:59:59Z", "timezone": "UTC"},
+            "config_summary": {"final_top": 15, "final_mix": {"enabled": True, "initial_slots": {
+                "youtube": 5, "reddit": 4, "crowdfunding": 1, "hackaday": 1, "other": 4,
+            }}},
+            "issue_stats": {}, "items": candidates,
+        }
+        final = strict_weekly.select_payload(researched, {"items": decisions})
+        self.assertEqual(len(final["items"]), 8)
+        self.assertEqual(sum(item["platform"] == "Instructables" for item in final["items"]), 3)
+        self.assertIn("youtube", final["issue_stats"]["final_mix"]["shortfalls"])
+        self.assertIn("reddit", final["issue_stats"]["final_mix"]["shortfalls"])
+        self.assertEqual(strict_weekly.validate_final(final), [])
+
+    def test_instructables_hard_maximum_refills_from_other_platforms(self):
+        specs = [("Instructables", 8), ("YouTube", 8), ("Reddit", 5)]
+        candidates, decisions = [], []
+        index = 0
+        for platform, count in specs:
+            for _ in range(count):
+                # Instructables deliberately has the highest editorial score;
+                # the explicit cap must still hold and refill must preserve 15.
+                score = 5 if platform == "Instructables" else 4
+                candidate, decision = self.strict_candidate_and_decision(index, platform, score)
+                candidates.append(candidate); decisions.append(decision); index += 1
+        researched = {
+            "week": {"start": "2026-08-03T00:00:00Z", "end": "2026-08-09T23:59:59Z", "timezone": "UTC"},
+            "config_summary": {"final_top": 15, "final_mix": {"enabled": True, "initial_slots": {
+                "youtube": 5, "reddit": 4, "crowdfunding": 1, "hackaday": 1, "other": 4,
+            }, "platform_maximums": {"instructables": 3}}},
+            "issue_stats": {}, "items": candidates,
+        }
+        final = strict_weekly.select_payload(researched, {"items": decisions})
+        self.assertEqual(len(final["items"]), 15)
+        self.assertEqual(sum(item["platform"] == "Instructables" for item in final["items"]), 3)
+        self.assertEqual(strict_weekly.validate_final(final), [])
+
     def test_final_selection_rejects_incomplete_strict_review(self):
         first_candidate, first_decision = self.strict_candidate_and_decision(1, "YouTube", 4)
         second_candidate, _ = self.strict_candidate_and_decision(2, "Reddit", 4)

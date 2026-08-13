@@ -32,6 +32,13 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertEqual(args.config, maker_weekly.DEFAULT_CONFIG_PATH)
         self.assertTrue(args.config.is_file())
 
+    def test_default_youtube_bundle_has_at_least_one_hundred_unique_channels(self):
+        config = json.loads(maker_weekly.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+        source = next(item for item in config["sources"] if item.get("platform") == "YouTube")
+        feeds = source["feed_urls"]
+        self.assertGreaterEqual(len(feeds), 100)
+        self.assertEqual(len(feeds), len(set(feeds)))
+
     def test_github_reuses_existing_gh_cli_login_without_configuration(self):
         source = {
             "id": "github", "type": "github", "platform": "GitHub",
@@ -1260,6 +1267,42 @@ class MakerWeeklyTests(unittest.TestCase):
         gate = maker_weekly.derive_physical_gate(item, page)
         self.assertEqual(gate["status"], "pass")
         self.assertTrue(all(gate["checks"].values()))
+
+    def test_youtube_direct_build_title_and_video_are_physical_evidence(self):
+        cases = [
+            ("I made an apple peel itself", "This video depicts an experimental machine I made."),
+            ("Building a Go Kart with Dirt Bikes!", "I combined two bikes with a custom fabricated chassis."),
+            ("Supersonic Trebuchet", "Full build from scratch; assembled and tested in action."),
+            ("Making a Giant Indoor Tree (out of trash)", "A DIY build made from discarded material."),
+            ("Let's build a digital clock!", "I built and soldered the complete clock kit."),
+        ]
+        for title, text in cases:
+            with self.subTest(title=title):
+                item = {
+                    "title": title, "platform": "YouTube",
+                    "url": "https://www.youtube.com/watch?v=maker01", "author": "Maker",
+                }
+                page = {
+                    "source_url": item["url"], "text": text,
+                    "media_urls": ["https://www.youtube.com/v/maker01?version=3"],
+                    "structured_steps": 18 if title == "Supersonic Trebuchet" else 0,
+                    "author": "Maker",
+                }
+                gate = maker_weekly.derive_physical_gate(item, page)
+                self.assertEqual(gate["status"], "pass")
+                self.assertTrue(all(gate["checks"].values()))
+
+    def test_youtube_direct_build_title_does_not_admit_software(self):
+        item = {
+            "title": "I built a mobile app from scratch", "platform": "YouTube",
+            "url": "https://www.youtube.com/watch?v=software1", "author": "Developer",
+        }
+        page = {
+            "source_url": item["url"], "text": "I built and tested the source code.",
+            "media_urls": ["https://www.youtube.com/v/software1?version=3"],
+            "structured_steps": 5, "author": "Developer",
+        }
+        self.assertEqual(maker_weekly.derive_physical_gate(item, page)["status"], "fail")
 
     def test_zero_gate_accepts_editorial_report_of_a_documented_physical_build(self):
         item = {

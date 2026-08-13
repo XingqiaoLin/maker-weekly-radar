@@ -14,7 +14,10 @@
       "other": 4
     },
     "shortfall_policy": "global_score_refill",
-    "other_policy": "platform_round_robin"
+    "other_policy": "platform_round_robin",
+    "platform_maximums": {
+      "instructables": 3
+    }
   },
   "request_timeout_seconds": 20,
   "physical_detail_timeout_seconds": 12,
@@ -139,7 +142,30 @@
         "https://www.youtube.com/feeds/videos.xml?channel_id=UCivi_f1nniBzEOfKhRoN12Q",
         "https://www.youtube.com/feeds/videos.xml?channel_id=UCW8-pJyPdYAdubad1veFB3A",
         "https://www.youtube.com/feeds/videos.xml?channel_id=UCYH-XXUE2QDaWKvABsWJh8w",
-        "https://www.youtube.com/feeds/videos.xml?channel_id=UCEVelHmwuCqyje6YTAP2UIA"
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCEVelHmwuCqyje6YTAP2UIA",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCwYHJODESK0vVQykuk2LfAQ",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCUuMYw2l2UeWyTGYixYfRCA",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCq2rNse2XX4Rjzmldv9GqrQ",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UC6u6uY4VbvuNtU0BU7F9olw",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UC8q2GgxOUS_Dzd5KIYeJQIw",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCSC1HqVmTaE4Shn32ihbC7w",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCC6dJppCR8WJUxoMMOf5dlA",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCsI_41SZafKtB5qE46WjlQQ",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCCS6ZRelvETSbA53xFEsa6w",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCVryWqJ4cSlbTSETBHpBUWw",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCdxTCCRnQgfi2vr2fZupYIQ",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCKU7oz0NZLOml3dzGOjPfXg",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCcgqJ1blFKqbC2bWGY4Opmg",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UC1V-DYqsaj764uBis9-UDug",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCQ_bmgSrYsQS0LboA_tZpEw",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCETeXD_3awsQv-9rSdCYXQQ",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCSHtaUm-FjUps090S7crO4Q",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCJI86v9et-IZd1KJSfahN8g",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCxSzcblFl60AX3IazhPoviA",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCQJQB-ij7HNYKCyNdi0Y--Q",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCHk0IYEDJxQGQ-nbd3yP_KA",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCB4NFn-8oipHct0IfAQBQrQ",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UC7E8-0Ou69hwScPW1_fQApA"
       ]
     },
     {

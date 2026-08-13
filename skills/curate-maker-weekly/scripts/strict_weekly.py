@@ -26,6 +26,7 @@ SCORE_KEYS = {
     "cross_platform_continuity", "diversity_breakout",
 }
 EDITORIAL_MEDIA = {"hackaday", "make magazine", "the verge", "tom's hardware", "tom’s hardware"}
+DEFAULT_PLATFORM_MAXIMUMS = {"instructables": 3}
 
 
 class StrictError(ValueError):
@@ -315,19 +316,37 @@ def final_mix_select(
     if not mix:
         return ordered[:limit], {"enabled": False, "targets": {}, "eligible": {}, "selected": {}, "shortfalls": {}}
     targets = mix.get("initial_slots") if isinstance(mix.get("initial_slots"), dict) else {}
+    maximums = {
+        str(platform).lower(): int(value)
+        for platform, value in (mix.get("platform_maximums") or {}).items()
+    }
+    maximums = {**DEFAULT_PLATFORM_MAXIMUMS, **maximums}
     selected: list[dict[str, Any]] = []
+    def below_platform_maximum(item: dict[str, Any]) -> bool:
+        platform = str(item.get("platform") or "").lower()
+        maximum = maximums.get(platform)
+        return maximum is None or sum(
+            str(existing.get("platform") or "").lower() == platform for existing in selected
+        ) < maximum
+
     for bucket in ("youtube", "reddit", "crowdfunding", "hackaday", "other"):
         target = max(0, int(targets.get(bucket) or 0))
         pool = [item for item in ordered if maker_weekly.candidate_mix_bucket(item) == bucket and item not in selected]
-        chosen = maker_weekly.round_robin_platforms(pool, target) if bucket == "other" else pool[:target]
-        for item in chosen:
+        pool = maker_weekly.round_robin_platforms(pool, len(pool)) if bucket == "other" else pool
+        for item in pool:
+            if sum(maker_weekly.candidate_mix_bucket(existing) == bucket for existing in selected) >= target:
+                break
+            if not below_platform_maximum(item):
+                continue
             item["final_mix_bucket"] = bucket
             item["final_mix_slot"] = "minimum_target"
-        selected.extend(chosen)
+            selected.append(item)
     for item in ordered:
         if len(selected) >= limit:
             break
         if item in selected:
+            continue
+        if not below_platform_maximum(item):
             continue
         item["final_mix_bucket"] = maker_weekly.candidate_mix_bucket(item)
         item["final_mix_slot"] = "global_score_refill"
@@ -337,6 +356,17 @@ def final_mix_select(
         bucket: sum(maker_weekly.candidate_mix_bucket(item) == bucket for item in ordered)
         for bucket in ("youtube", "reddit", "crowdfunding", "hackaday", "other")
     }
+    selectable_counts = {}
+    for bucket in eligible_counts:
+        per_platform: dict[str, int] = {}
+        for item in ordered:
+            if maker_weekly.candidate_mix_bucket(item) != bucket:
+                continue
+            platform = str(item.get("platform") or "").lower()
+            per_platform[platform] = per_platform.get(platform, 0) + 1
+        selectable_counts[bucket] = sum(
+            min(count, maximums.get(platform, count)) for platform, count in per_platform.items()
+        )
     selected_counts = {
         bucket: sum(maker_weekly.candidate_mix_bucket(item) == bucket for item in selected)
         for bucket in eligible_counts
@@ -348,8 +378,9 @@ def final_mix_select(
     }
     return selected, {
         "enabled": True, "applied_after_strict_review": True,
-        "targets": {key: int(value) for key, value in targets.items()},
-        "eligible": eligible_counts, "selected": selected_counts, "shortfalls": shortfalls,
+        "targets": {key: int(value) for key, value in targets.items()}, "platform_maximums": maximums,
+        "eligible": eligible_counts, "selectable": selectable_counts,
+        "selected": selected_counts, "shortfalls": shortfalls,
     }
 
 
@@ -470,10 +501,14 @@ def validate_final(payload: dict[str, Any]) -> list[str]:
             for bucket in ("youtube", "reddit", "crowdfunding", "hackaday", "other")
         }
         for bucket, target in targets.items():
-            eligible = int((mix.get("eligible") or {}).get(bucket) or 0)
+            eligible = int((mix.get("selectable") or mix.get("eligible") or {}).get(bucket) or 0)
             required = min(int(target), eligible)
             if selected_counts.get(bucket, 0) < required:
                 errors.append(f"final mix failed available minimum target for {bucket}")
+        for platform, maximum in (mix.get("platform_maximums") or {}).items():
+            actual = sum(str(item.get("platform") or "").lower() == str(platform).lower() for item in items)
+            if actual > int(maximum):
+                errors.append(f"final mix exceeded platform maximum for {platform}")
     return errors
 
 

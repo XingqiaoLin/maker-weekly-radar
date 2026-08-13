@@ -1261,7 +1261,54 @@ def derive_physical_gate(item: dict[str, Any], page: dict[str, Any]) -> dict[str
     trusted_creator_page = any(value in platform for value in TRUSTED_CREATOR_PLATFORMS)
     editorial_report = any(value in platform for value in EDITORIAL_REPORT_PLATFORMS)
     author_known = bool(str(item.get("author") or page.get("author") or "").strip())
-    video_project_claim = "youtube" in platform and bool(media_urls) and strong_physical and bool(process_hits) and not excluded
+    # A YouTube watch page is itself direct audiovisual evidence.  Maker
+    # videos often use a concrete build claim in the title ("I made an apple
+    # peel itself", "Supersonic Trebuchet") without repeating generic words
+    # such as hardware/device/prototype in the description.  Requiring two
+    # PHYSICAL_TERMS therefore produced false negatives even though the video
+    # and title directly documented a build.  Accept the narrow title forms
+    # below, while explicitly rejecting software/content claims; later gates
+    # still evaluate project scale, originality, first-release timing and
+    # excellence.
+    direct_build_title = bool(re.search(
+        r"^(?:i|we)\s+(?:made|built|fabricated|machined|printed)\b|"
+        r"^(?:making|building|fabricating|machining|printing)\b|"
+        r"^(?:let(?:'|’)s\s+build|diy)\b|"
+        r"\b(?:full build|from scratch)\b",
+        str(item.get("title") or "").strip(),
+        flags=re.IGNORECASE,
+    ))
+    digital_only_title = bool(re.search(
+        r"\b(?:app|website|software|source code|codebase|algorithm|prompt|"
+        r"dataset|language model|llm|video game|mobile game)\b",
+        classification_text,
+        flags=re.IGNORECASE,
+    ))
+    youtube_direct_build = (
+        "youtube" in platform
+        and bool(media_urls)
+        and direct_build_title
+        and bool(process_hits)
+        and not excluded
+        and not digital_only_title
+    )
+    youtube_structured_build = (
+        "youtube" in platform
+        and bool(media_urls)
+        and structured_steps >= 2
+        and bool(process_hits)
+        and bool(result_hits)
+        and not excluded
+        and not digital_only_title
+    )
+    youtube_build_evidence = youtube_direct_build or youtube_structured_build
+    video_project_claim = (
+        "youtube" in platform
+        and bool(media_urls)
+        and (strong_physical or youtube_build_evidence)
+        and bool(process_hits)
+        and not excluded
+    )
     reported_physical_build = (
         editorial_report
         and bool(media_urls)
@@ -1277,15 +1324,15 @@ def derive_physical_gate(item: dict[str, Any], page: dict[str, Any]) -> dict[str
         or reported_physical_build
     )
     physical_core = (
-        (len(set(classification_physical_hits)) >= 2 if editorial_report else strong_physical)
+        (len(set(classification_physical_hits)) >= 2 if editorial_report else (strong_physical or youtube_build_evidence))
         and not excluded
     )
     # A direct project photo/video plus a documented multi-step build is itself
     # evidence of a built result or substantive prototype. Do not require the
     # prose to contain English completion words such as "finished" or "working".
-    documented_progress = structured_steps >= 2 or (creator_made and len(set(process_hits)) >= 2)
+    documented_progress = structured_steps >= 2 or youtube_direct_build or (creator_made and len(set(process_hits)) >= 2)
     built_result = bool(media_urls) and physical_core and (bool(result_hits) or documented_progress)
-    human_process = (structured_steps >= 2 or len(set(process_hits)) >= 2) and creator_made
+    human_process = (structured_steps >= 2 or youtube_direct_build or len(set(process_hits)) >= 2) and creator_made
     checks = {
         "creator_made_physical": bool(creator_made),
         "physical_is_core": bool(physical_core),
@@ -2752,6 +2799,15 @@ def validate_config(config: dict[str, Any]) -> None:
             raise ConfigError("final_mix initial slots must be non-negative integers")
         if sum(quotas.values()) > final_top:
             raise ConfigError("final_mix initial slots cannot exceed final_top")
+        maximums = final_mix.get("platform_maximums", {})
+        if not isinstance(maximums, dict):
+            raise ConfigError("final_mix.platform_maximums must be an object")
+        if any(
+            not isinstance(platform, str) or not platform.strip()
+            or not isinstance(value, int) or isinstance(value, bool) or value < 0
+            for platform, value in maximums.items()
+        ):
+            raise ConfigError("final_mix platform maximums must map platform names to non-negative integers")
     seen = set()
     for source in config["sources"]:
         if not isinstance(source, dict) or not source.get("id"):
