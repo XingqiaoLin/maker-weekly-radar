@@ -34,17 +34,17 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-USER_AGENT = "maker-weekly-radar/0.17"
+USER_AGENT = "maker-weekly-radar/0.18"
 YOUTUBE_BROWSER_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0 Safari/537.36"
 )
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "assets" / "config.example.json"
 HEAT_THRESHOLDS = {
-    "kickstarter": {"usd_pledged": 5_000, "backers": 50},
+    "kickstarter": {"usd_pledged": 5_000, "backers": 40},
     "indiegogo": {"usd_pledged": 20_000, "backers": 200},
     "youtube": {"views": 25_000, "channel_subscribers": 10_000},
-    "reddit": {"score_plus_comments": 500, "weekly_rss_rank": 10},
+    "reddit": {"score_plus_comments": 500, "weekly_rss_rank": 50},
     "github": {"stars": 1_000},
     "social": {"interactions": 5_000},
 }
@@ -54,7 +54,7 @@ REQUIRED_PLATFORMS = {
 }
 SUPPORTED_TYPES = {
     "github", "youtube", "reddit", "instagram", "rss", "manual", "web_html", "instructables_web",
-    "kickstarter_kicktraq", "indiegogo_public", "instagram_fallback",
+    "kickstarter_kicktraq", "indiegogo_public", "instagram_fallback", "dated_archive",
 }
 TRACKING_PARAMS = {
     "fbclid", "gclid", "mc_cid", "mc_eid", "ref", "source", "utm_campaign",
@@ -527,6 +527,166 @@ def cap_and_rank(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]
     return ordered
 
 
+def normalized_heat_strength(item: dict[str, Any], thresholds: Any = None) -> float:
+    """Return a bounded, cross-platform heat signal for global candidate ranking."""
+    resolved = resolve_heat_thresholds(thresholds)
+    platform = str(item.get("platform") or "").lower().strip()
+    metrics = item.get("metrics") if isinstance(item.get("metrics"), dict) else {}
+    ratios: list[float] = []
+    if "kickstarter" in platform:
+        pledged, _ = admissible_kickstarter_usd(metrics)
+        backers = metric_number(metrics, "backers")
+        ratios = [
+            (pledged or 0) / resolved["kickstarter"]["usd_pledged"],
+            (backers or 0) / resolved["kickstarter"]["backers"],
+        ]
+    elif "indiegogo" in platform:
+        ratios = [
+            (metric_number(metrics, "usd_pledged", "pledged_usd") or 0) / resolved["indiegogo"]["usd_pledged"],
+            (metric_number(metrics, "backers") or 0) / resolved["indiegogo"]["backers"],
+        ]
+    elif "github" in platform:
+        ratios = [(metric_number(metrics, "stars") or 0) / resolved["github"]["stars"]]
+    elif "youtube" in platform:
+        ratios = [
+            (metric_number(metrics, "views") or 0) / resolved["youtube"]["views"],
+            (metric_number(metrics, "channel_subscribers", "subscribers") or 0) / resolved["youtube"]["channel_subscribers"],
+        ]
+    elif "reddit" in platform:
+        score = metric_number(metrics, "score", "upvotes")
+        comments = metric_number(metrics, "comments")
+        if score is not None and comments is not None:
+            ratios = [(score + comments) / resolved["reddit"]["score_plus_comments"]]
+        else:
+            rank = metric_number(metrics, "weekly_rss_rank")
+            if rank is not None and 1 <= rank <= resolved["reddit"]["weekly_rss_rank"]:
+                ratios = [1.0 + (resolved["reddit"]["weekly_rss_rank"] - rank) / resolved["reddit"]["weekly_rss_rank"]]
+    elif platform in {"x", "x / twitter", "twitter", "instagram"}:
+        interactions = metric_number(metrics, "interactions")
+        if interactions is None:
+            values = [metric_number(metrics, key) for key in ("likes", "comments", "reposts", "replies", "quotes")]
+            interactions = sum(value or 0 for value in values) if any(value is not None for value in values) else 0
+        ratios = [interactions / resolved["social"]["interactions"]]
+    else:
+        # Featured/editorial sources already passed their platform-specific heat
+        # gate. Give them a neutral threshold-strength score.
+        ratios = [1.0]
+    return round(min(3.0, max(ratios or [0.0])), 4)
+
+
+def global_candidate_score(item: dict[str, Any], as_of: datetime, thresholds: Any = None) -> tuple[float, dict[str, float]]:
+    """Score verified candidates across platforms without imposing platform quotas."""
+    gate = item.get("physical_gate") if isinstance(item.get("physical_gate"), dict) else {}
+    checks = gate.get("checks") if isinstance(gate.get("checks"), dict) else {}
+    heat = normalized_heat_strength(item, thresholds)
+    evidence_count = len(set(str(url) for url in (item.get("evidence") or []) if url))
+    page = item.get("physical_page") if isinstance(item.get("physical_page"), dict) else {}
+    media_count = len(page.get("media_urls") or [])
+    steps = int(page.get("structured_steps") or 0)
+    process = min(1.0, (steps / 6.0) + (0.25 if checks.get("human_process_visible") else 0.0))
+    evidence = min(1.0, evidence_count / 5.0 + media_count / 10.0)
+    completeness = sum(bool(checks.get(key)) for key in (
+        "creator_made_physical", "physical_is_core", "built_result_visible", "human_process_visible",
+    )) / 4.0
+    cross_platform = min(1.0, len(item.get("also_seen_on") or []) / 2.0)
+    published = parse_datetime(item.get("published_at"))
+    freshness = 0.0
+    if published:
+        age_days = max(0.0, (as_of - published).total_seconds() / 86400)
+        freshness = max(0.0, 1.0 - age_days / 7.0)
+    components = {
+        "heat_strength": round(min(1.0, heat / 3.0) * 35.0, 3),
+        "physical_evidence": round(evidence * 20.0, 3),
+        "build_process": round(process * 20.0, 3),
+        "built_result": round(completeness * 15.0, 3),
+        "cross_platform": round(cross_platform * 5.0, 3),
+        "freshness": round(freshness * 5.0, 3),
+    }
+    return round(sum(components.values()), 3), components
+
+
+def candidate_mix_bucket(item: dict[str, Any]) -> str:
+    platform = str(item.get("platform") or "").lower().strip()
+    if "youtube" in platform:
+        return "youtube"
+    if "reddit" in platform:
+        return "reddit"
+    if "kickstarter" in platform or "indiegogo" in platform:
+        return "crowdfunding"
+    if "hackaday" in platform:
+        return "hackaday"
+    return "other"
+
+
+def round_robin_platforms(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """Distribute a bucket across its platforms before taking second entries."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        groups.setdefault(str(item.get("platform") or "unknown"), []).append(item)
+    selected: list[dict[str, Any]] = []
+    while len(selected) < limit and any(groups.values()):
+        active = sorted(
+            (values for values in groups.values() if values),
+            key=lambda values: values[0].get("radar_score", 0.0),
+            reverse=True,
+        )
+        for values in active:
+            if len(selected) >= limit:
+                break
+            selected.append(values.pop(0))
+    return selected
+
+
+def rank_global_candidates(
+    items: list[dict[str, Any]], as_of: datetime, limit: int, thresholds: Any = None,
+    candidate_mix: Any = None,
+) -> list[dict[str, Any]]:
+    """Rank globally, optionally reserving source targets before global refill."""
+    unique = deduplicate(items)
+    for item in unique:
+        score, components = global_candidate_score(item, as_of, thresholds)
+        item["radar_score"] = score
+        item["radar_score_breakdown"] = components
+    ordered = sorted(
+        unique,
+        key=lambda item: (item.get("radar_score", 0.0), item.get("published_at") or "", item.get("title") or ""),
+        reverse=True,
+    )
+    selected: list[dict[str, Any]] = []
+    mix = candidate_mix if isinstance(candidate_mix, dict) and candidate_mix.get("enabled") is True else None
+    if mix:
+        quotas = mix.get("initial_slots") if isinstance(mix.get("initial_slots"), dict) else {}
+        for bucket in ("youtube", "reddit", "crowdfunding", "hackaday", "other"):
+            quota = max(0, int(quotas.get(bucket) or 0))
+            pool = [item for item in ordered if candidate_mix_bucket(item) == bucket and item not in selected]
+            chosen = round_robin_platforms(pool, quota) if bucket == "other" else pool[:quota]
+            for item in chosen:
+                item["candidate_mix_bucket"] = bucket
+                item["candidate_mix_slot"] = "initial_source_target"
+            selected.extend(chosen)
+        # Targets are floors when enough eligible projects exist, not caps. Any
+        # unfilled or remaining slots return to the global quality order, which
+        # may add more YouTube or Reddit projects beyond their initial targets.
+        for item in ordered:
+            if len(selected) >= limit:
+                break
+            if item in selected:
+                continue
+            item["candidate_mix_bucket"] = candidate_mix_bucket(item)
+            item["candidate_mix_slot"] = "global_score_refill"
+            selected.append(item)
+    else:
+        selected = ordered[:limit]
+    selected.sort(
+        key=lambda item: (item.get("radar_score", 0.0), item.get("published_at") or "", item.get("title") or ""),
+        reverse=True,
+    )
+    for index, item in enumerate(selected[:limit], 1):
+        item["candidate_rank"] = index
+        item.pop("_raw_score", None)
+    return selected[:limit]
+
+
 def publication_is_in_window(item: dict[str, Any], since: datetime, as_of: datetime) -> bool:
     """Return true only when the original publication timestamp is known and in range."""
     published = parse_datetime(item.get("published_at"))
@@ -534,7 +694,7 @@ def publication_is_in_window(item: dict[str, Any], since: datetime, as_of: datet
 
 
 def verified_platform_heat_passes(item: dict[str, Any], thresholds: Any = None) -> bool:
-    """Apply public YouTube/Reddit heat gates before a platform Top 5 is chosen."""
+    """Apply public YouTube/Reddit heat gates before global candidate ranking."""
     verification = item.get("metric_verification") or {}
     if verification.get("status") != "ok":
         return False
@@ -1040,7 +1200,7 @@ EXCLUSION_PATTERNS = (
     r"\b(benchmark|performance test|npu test|model inference)\b",
     r"\b(simulation only|mujoco|digital twin only|virtual prototype|reinforcement learning environment)\b",
     r"\b(autoresearch|coding agents?|code experiments?|algorithm architectures?)\b",
-    r"\b(unboxing|product review|hands-on review|buying guide|news roundup)\b",
+    r"\b(unboxing|mailbag|what(?:'s| is) in the mail|product review|hands-on review|buying guide|news roundup)\b",
     r"\b(board game|card game|tabletop game)\b",
     r"\b(concept|rendering|render only|prelaunch|coming soon|story only)\b",
     r"\b(recipe|cooking|baking|food)\b",
@@ -1365,6 +1525,130 @@ def collect_web_html(source: dict[str, Any], context: dict[str, Any]) -> list[di
     return results
 
 
+def archive_urls(source: dict[str, Any], context: dict[str, Any]) -> list[str]:
+    """Expand official date/month archive templates for the requested issue."""
+    templates = source.get("archive_url_templates") or [source.get("archive_url_template")]
+    if not isinstance(templates, list) or not templates:
+        raise ConfigError("dated_archive requires archive_url_template(s)")
+    days: list[datetime] = []
+    cursor = context["since"].replace(hour=0, minute=0, second=0, microsecond=0)
+    while cursor.date() <= context["as_of"].date():
+        days.append(cursor)
+        cursor += timedelta(days=1)
+    urls: list[str] = []
+    for template in templates:
+        value = str(template or "")
+        if not value.startswith(("http://", "https://")):
+            raise ConfigError("dated_archive templates must use http(s)")
+        dates = days if any(token in value for token in ("{day}", "{date}")) else [days[0]]
+        for day in dates:
+            url = value.format(
+                year=f"{day.year:04d}", month=f"{day.month:02d}", month_int=day.month,
+                day=f"{day.day:02d}", day_int=day.day, date=day.date().isoformat(),
+            )
+            if url not in urls:
+                urls.append(url)
+    return urls
+
+
+def collect_dated_archive(source: dict[str, Any], context: dict[str, Any]) -> list[dict[str, Any]]:
+    """Discover articles from official target-week archive, sitemap, or paged-feed URLs."""
+    link_pattern = re.compile(str(source.get("link_pattern") or r"^https?://"), re.IGNORECASE)
+    required_keywords = [str(value).lower() for value in source.get("keywords") or []]
+    discovered: dict[str, dict[str, str]] = {}
+    failures: list[str] = []
+    archives = archive_urls(source, context)
+    for archive_url in archives:
+        try:
+            raw = request_bytes(archive_url, context["timeout"], headers={"Accept": "text/html,application/xml,application/rss+xml"})
+        except (AccessBlocked, RuntimeError) as exc:
+            failures.append(f"{archive_url}: {exc}")
+            continue
+        text = raw.decode("utf-8", errors="replace")
+        try:
+            parser, _ = parse_public_page(raw)
+            links = [(link["href"], link["title"]) for link in parser.links]
+        except RuntimeError:
+            links = []
+        try:
+            xml_root = ET.fromstring(raw)
+        except ET.ParseError:
+            xml_root = None
+        if xml_root is not None:
+            for node in list(xml_root):
+                values = {local_name(child.tag): clean_text(child.text, 2000) for child in list(node)}
+                loc = values.get("loc")
+                lastmod = parse_datetime(values.get("lastmod"))
+                if loc and (lastmod is None or context["since"] <= lastmod <= context["as_of"]):
+                    links.append((html.unescape(loc), ""))
+        for href, title in links:
+            absolute = urllib.parse.urljoin(archive_url, html.unescape(href))
+            normalized = canonical_url(absolute)
+            if link_pattern.search(normalized):
+                discovered.setdefault(normalized, {"url": absolute, "title": clean_text(title, 300), "archive_url": archive_url})
+    if not discovered:
+        detail = "; ".join(failures) or "official target-week archives exposed no matching article links"
+        if failures and all("blocked" in value.lower() for value in failures):
+            raise AccessBlocked(detail)
+        raise RuntimeError(detail)
+
+    # Archive URLs often contain descriptive slugs. Apply a cheap, permissive
+    # URL/title prefilter before opening article pages; the physical gate still
+    # performs the authoritative evidence check later.
+    if required_keywords and source.get("archive_keyword_prefilter", True):
+        filtered = {
+            key: value for key, value in discovered.items()
+            if any(keyword.replace(" ", "-") in f"{key} {value.get('title', '')}".lower() for keyword in required_keywords)
+        }
+        if filtered:
+            discovered = filtered
+
+    results: list[dict[str, Any]] = []
+    captured_at = iso_z(now_utc())
+    max_details = min(150, int(source.get("detail_candidate_limit") or context["limit"] * 3))
+    def load_detail(found: dict[str, str]) -> tuple[dict[str, str], PublicPageParser | None, str]:
+        try:
+            parser, raw_text = parse_public_page(request_bytes(found["url"], context["timeout"], headers={"Accept": "text/html,application/xhtml+xml"}))
+            return found, parser, raw_text
+        except (AccessBlocked, RuntimeError):
+            return found, None, ""
+
+    selected = list(discovered.values())[:max_details]
+    workers = max(1, min(8, int(source.get("detail_workers") or 4), len(selected)))
+    if workers == 1:
+        loaded_details = [load_detail(found) for found in selected]
+    else:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dated-archive") as executor:
+            loaded_details = list(executor.map(load_detail, selected))
+    for found, parser, raw_text in loaded_details:
+        if parser is None:
+            continue
+        metadata = public_page_metadata(parser, found["url"])
+        published = parse_datetime(metadata.get("published_at"))
+        if not published or not (context["since"] <= published <= context["as_of"]):
+            continue
+        title = metadata.get("title") or found["title"]
+        haystack = f"{title} {metadata.get('summary')} {metadata.get('visible_text')}".lower()
+        if required_keywords and not any(keyword in haystack for keyword in required_keywords):
+            continue
+        item = candidate(
+            source, title, metadata.get("url") or found["url"], summary=metadata.get("summary"),
+            author=metadata.get("author"), published_at=published, metrics={"editorial_report": True},
+            metrics_captured_at=captured_at, evidence=[found["url"], found["archive_url"]],
+            raw_score=sum(keyword in haystack for keyword in required_keywords),
+        )
+        if item:
+            item["physical_page"] = {
+                "source_url": found["url"],
+                "text": f"{title} {metadata.get('summary')} {metadata.get('visible_text')}",
+                "media_urls": page_media_urls(parser, raw_text, found["url"]),
+                "structured_steps": len(re.findall(r"\b(build|built|making|fabricat|assembl|solder|test|iterat|prototype|from scratch)\w*\b", metadata.get("visible_text") or "", flags=re.IGNORECASE)),
+                "author": metadata.get("author"),
+            }
+            results.append(item)
+    return results
+
+
 def parse_kickstarter_widget(raw: bytes) -> dict[str, Any]:
     """Read the official Kickstarter card payload without treating bundled JS as a challenge."""
 
@@ -1384,6 +1668,56 @@ def parse_kickstarter_widget(raw: bytes) -> dict[str, Any]:
         if isinstance(payload, dict) and payload.get("name") and payload.get("urls"):
             return payload
     raise RuntimeError("Kickstarter widget exposed invalid project JSON")
+
+
+def kickstarter_cache_path(source: dict[str, Any], context: dict[str, Any]) -> Path | None:
+    raw = source.get("evidence_cache_path")
+    if raw in {None, False, ""}:
+        return None
+    configured = Path(str(raw))
+    if not configured.is_absolute():
+        configured = Path(context.get("config_dir") or Path.cwd()) / configured
+    return configured.resolve()
+
+
+def load_kickstarter_cache(source: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    path = kickstarter_cache_path(source, context)
+    if path is None or not path.exists():
+        return {}
+    try:
+        payload = read_json(path)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload.get("projects", {}) if isinstance(payload, dict) and isinstance(payload.get("projects"), dict) else {}
+
+
+def save_kickstarter_cache(source: dict[str, Any], context: dict[str, Any], projects: dict[str, Any]) -> None:
+    path = kickstarter_cache_path(source, context)
+    if path is None:
+        return
+    write_json(path, {
+        "schema_version": 1,
+        "policy": "official-widget-observations-only",
+        "updated_at": iso_z(now_utc()),
+        "projects": projects,
+    })
+
+
+def cached_kickstarter_payload(entry: Any, context: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(entry, dict) or not isinstance(entry.get("payload"), dict):
+        return None
+    launched = parse_datetime(entry["payload"].get("launched_at"))
+    captured = parse_datetime(entry.get("captured_at"))
+    # Cache fallback is deliberately limited to the same issue. It preserves a
+    # previous official observation; it never pretends to be a new live metric.
+    if not launched or not (context["since"] <= launched <= context["as_of"]):
+        return None
+    if not captured or captured < context["since"]:
+        return None
+    payload = deepcopy(entry["payload"])
+    payload["_cache_captured_at"] = iso_z(captured)
+    payload["_cache_widget_url"] = entry.get("widget_url")
+    return payload
 
 
 def collect_kickstarter_kicktraq(source: dict[str, Any], context: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1446,14 +1780,21 @@ def collect_kickstarter_kicktraq(source: dict[str, Any], context: dict[str, Any]
     captured_at = iso_z(now_utc())
     kickstarter_threshold = resolve_heat_thresholds(context.get("heat_thresholds"))["kickstarter"]
 
-    def load_project(discovered_item: dict[str, str]) -> tuple[dict[str, str], dict[str, Any] | None]:
+    cache = load_kickstarter_cache(source, context)
+    cache_changed = False
+
+    def load_project(discovered_item: dict[str, str]) -> tuple[dict[str, str], dict[str, Any] | None, str]:
         widget_url = discovered_item["url"] + "/widget/card.html?v=2"
         try:
             payload = parse_kickstarter_widget(request_bytes(widget_url, context["timeout"], headers={"Accept": "text/html"}))
         except (AccessBlocked, RuntimeError):
-            return discovered_item, None
+            cached = cached_kickstarter_payload(cache.get(canonical_url(discovered_item["url"])), context)
+            if cached is None:
+                return discovered_item, None, "failed"
+            cached["_widget_url"] = str(cached.pop("_cache_widget_url", None) or widget_url)
+            return discovered_item, cached, "cache"
         payload["_widget_url"] = widget_url
-        return discovered_item, payload
+        return discovered_item, payload, "live"
 
     workers = max(1, min(8, int(source.get("detail_workers") or 4), len(discovered)))
     if workers == 1:
@@ -1464,10 +1805,16 @@ def collect_kickstarter_kicktraq(source: dict[str, Any], context: dict[str, Any]
 
     results: list[dict[str, Any]] = []
     parsed_details = 0
-    for discovered_item, project in loaded:
+    for discovered_item, project, evidence_mode in loaded:
         if project is None:
             continue
         parsed_details += 1
+        if evidence_mode == "live":
+            cache[canonical_url(discovered_item["url"])] = {
+                "payload": {key: value for key, value in project.items() if not str(key).startswith("_")},
+                "widget_url": project["_widget_url"], "captured_at": captured_at,
+            }
+            cache_changed = True
         title, summary = clean_text(project.get("name"), 300), clean_text(project.get("blurb"))
         category = project.get("category") if isinstance(project.get("category"), dict) else {}
         category_text = " ".join(str(category.get(key) or "") for key in ("name", "parent_name"))
@@ -1517,16 +1864,20 @@ def collect_kickstarter_kicktraq(source: dict[str, Any], context: dict[str, Any]
         tags = [str(category.get(key) or "") for key in ("parent_name", "name")]
         item = candidate(
             source, title, project_url, summary=summary, author=creator.get("name"), published_at=launched,
-            metrics=metrics, metrics_captured_at=captured_at, tags=tags,
+            metrics=metrics, metrics_captured_at=(project.get("_cache_captured_at") or captured_at), tags=tags,
             evidence=[project_url, project["_widget_url"], discovered_item["kicktraq_url"], discovered_item["listing_url"]],
             raw_score=(reported_usd_pledged / kickstarter_threshold["usd_pledged"] if currency == "USD" else 0) + backers / kickstarter_threshold["backers"],
         )
         if item:
             item["metric_verification"] = {
-                "status": "ok", "source_url": project["_widget_url"], "captured_at": captured_at,
-                "ranking_basis": "eligible_usd_pledged/5000 + backers/50; non-USD widget equivalents are audit-only",
+                "status": "ok", "source_url": project["_widget_url"],
+                "captured_at": project.get("_cache_captured_at") or captured_at,
+                "provenance": "kickstarter_official_widget_cache" if evidence_mode == "cache" else "kickstarter_official_widget",
+                "ranking_basis": "eligible_usd_pledged/5000 + backers/40; non-USD widget equivalents are audit-only",
             }
             results.append(item)
+    if cache_changed:
+        save_kickstarter_cache(source, context, cache)
     if parsed_details == 0:
         raise RuntimeError("Kicktraq found projects, but every official Kickstarter widget failed")
     return results
@@ -2376,18 +2727,28 @@ COLLECTORS: dict[str, Callable[[dict[str, Any], dict[str, Any]], list[dict[str, 
     "instructables_web": collect_instructables_web,
     "kickstarter_kicktraq": collect_kickstarter_kicktraq,
     "indiegogo_public": collect_indiegogo_public,
+    "dated_archive": collect_dated_archive,
 }
 
 
 def validate_config(config: dict[str, Any]) -> None:
     if not isinstance(config.get("sources"), list):
         raise ConfigError("config.sources must be an array")
-    top_per_source = int(config.get("top_per_source", 5))
     final_top = int(config.get("final_top", 15))
-    if not 1 <= top_per_source <= 50:
-        raise ConfigError("top_per_source must be between 1 and 50")
     if not 1 <= final_top <= 100:
         raise ConfigError("final_top must be between 1 and 100")
+    candidate_mix = config.get("candidate_mix")
+    if candidate_mix is not None:
+        if not isinstance(candidate_mix, dict) or not isinstance(candidate_mix.get("enabled"), bool):
+            raise ConfigError("candidate_mix must be an object with boolean enabled")
+        quotas = candidate_mix.get("initial_slots")
+        allowed_buckets = {"youtube", "reddit", "crowdfunding", "hackaday", "other"}
+        if not isinstance(quotas, dict) or set(quotas) != allowed_buckets:
+            raise ConfigError("candidate_mix.initial_slots must define youtube, reddit, crowdfunding, hackaday, and other")
+        if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in quotas.values()):
+            raise ConfigError("candidate_mix initial slots must be non-negative integers")
+        if sum(quotas.values()) > final_top:
+            raise ConfigError("candidate_mix initial slots cannot exceed final_top")
     seen = set()
     for source in config["sources"]:
         if not isinstance(source, dict) or not source.get("id"):
@@ -2414,7 +2775,7 @@ def load_config(path: Path) -> dict[str, Any]:
 
 def merge_duplicate(primary: dict[str, Any], duplicate: dict[str, Any]) -> None:
     if duplicate["url"] != primary["url"]:
-        primary["also_seen_on"].append({"platform": duplicate["platform"], "source_id": duplicate["source_id"], "url": duplicate["url"]})
+        primary.setdefault("also_seen_on", []).append({"platform": duplicate["platform"], "source_id": duplicate["source_id"], "url": duplicate["url"]})
     primary["evidence"] = list(dict.fromkeys(primary.get("evidence", []) + duplicate.get("evidence", [])))
     primary["tags"] = sorted(set(primary.get("tags", []) + duplicate.get("tags", [])))
     if len(duplicate.get("summary", "")) > len(primary.get("summary", "")):
@@ -2534,7 +2895,7 @@ def status_record(
 def collect_raw_envelope(config_path: Path, as_of: datetime, source_ids: set[str] | None = None) -> dict[str, Any]:
     config = load_config(config_path)
     lookback_days = int(config.get("lookback_days", 7))
-    limit = int(config.get("top_per_source", 5))
+    final_top = int(config.get("final_top", 15))
     keywords = [str(word) for word in config.get("keywords") or []]
     window_start = (as_of - timedelta(days=max(0, lookback_days - 1))).replace(hour=0, minute=0, second=0, microsecond=0)
     context = {
@@ -2555,9 +2916,9 @@ def collect_raw_envelope(config_path: Path, as_of: datetime, source_ids: set[str
             discovery_limit = int(source.get("raw_discovery_limit") or context["limit"])
             if discovery_limit < 1:
                 raise ConfigError(f"raw_discovery_limit for {source['id']} must be at least 1")
-            # This is only a bounded raw-fetch budget, not the platform Top 5.
+            # This is only a bounded raw-fetch budget, not a platform quota.
             # The Make Something Gate, time gate, and heat gate still run before
-            # the later editorial Top 5 calculation.
+            # global candidate scoring and the final candidate Top 15.
             raw_items = sorted(
                 raw_items,
                 key=lambda item: (item.get("_raw_score", 0.0), item.get("published_at") or ""),
@@ -2587,8 +2948,9 @@ def collect_raw_envelope(config_path: Path, as_of: datetime, source_ids: set[str
             "lookback_days": lookback_days,
             "strict_current_week_only": bool(config.get("strict_current_week_only", True)),
             "heat_observation_policy": "execution_time",
-            "top_per_source": limit,
-            "final_top": int(config.get("final_top", 15)),
+            "candidate_ranking": "global-radar-score-v1",
+            "candidate_mix": config.get("candidate_mix") or {},
+            "final_top": final_top,
             "keywords": keywords,
             "heat_thresholds": context["heat_thresholds"],
         },
@@ -2747,7 +3109,7 @@ def evaluate_heat_gate(item: dict[str, Any], as_of: datetime, thresholds: Any = 
         reported_usd, backers = metric_number(metrics, "reported_usd_pledged", "usd_pledged", "pledged_usd"), metric_number(metrics, "backers")
         threshold = resolved["kickstarter"]
         gate.update(
-            threshold="可审计 US$5,000 或 50 名支持者",
+            threshold=f"可审计 US${threshold['usd_pledged']:,.0f} 或 {threshold['backers']:g} 名支持者",
             observed=f"eligible_usd={pledged}; reported_usd={reported_usd}; currency={metrics.get('currency')}; backers={backers}",
             amount_basis=amount_basis,
         )
@@ -2784,10 +3146,10 @@ def evaluate_heat_gate(item: dict[str, Any], as_of: datetime, thresholds: Any = 
 
 
 def editorial_candidates_envelope(payload: dict[str, Any], as_of: datetime) -> dict[str, Any]:
-    """Apply time and heat gates, then calculate each platform's Top 5."""
+    """Apply mandatory gates, deduplicate globally, and rank the best 15 candidates."""
     result = deepcopy(payload)
     start = parse_datetime(result.get("window_start")) or as_of
-    limit = int((result.get("config_summary") or {}).get("top_per_source", 5))
+    limit = int((result.get("config_summary") or {}).get("final_top", 15))
     thresholds = (result.get("config_summary") or {}).get("heat_thresholds")
     coverage_by_source = {
         str(status.get("source_id") or ""): str(status.get("status") or "error")
@@ -2807,12 +3169,11 @@ def editorial_candidates_envelope(payload: dict[str, Any], as_of: datetime) -> d
         item["heat_gate"] = evaluate_heat_gate(item, as_of, thresholds)
         if item.get("physical_gate", {}).get("status") == "pass" and item["time_gate"]["status"] == "pass" and item["heat_gate"]["status"] == "pass":
             passed.append(item)
-    top_items: list[dict[str, Any]] = []
-    for platform in dict.fromkeys(str(item.get("platform")) for item in passed):
-        top_items.extend(cap_and_rank([item for item in passed if str(item.get("platform")) == platform], limit))
-    result["items"] = deduplicate(top_items)
+    candidate_mix = (result.get("config_summary") or {}).get("candidate_mix")
+    mix_enabled = isinstance(candidate_mix, dict) and candidate_mix.get("enabled") is True
+    result["items"] = rank_global_candidates(passed, as_of, limit, thresholds, candidate_mix)
     result["stage"] = "editorial_candidates"
-    result["selection_method"] = "physical-time-heat-platform-top5"
+    result["selection_method"] = "physical-time-heat-soft-mix-top15-v1" if mix_enabled else "physical-time-heat-global-top15-v1"
     time_passed = sum(publication_is_in_window(item, start, as_of) for item in payload.get("items") or [])
     heat_passed = sum(
         publication_is_in_window(item, start, as_of) and evaluate_heat_gate(item, as_of, thresholds).get("status") == "pass"
@@ -2977,7 +3338,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
             links = ", ".join(f"[{seen.get('platform')}]({seen.get('url')})" for seen in item["also_seen_on"])
             lines.append(f"- 其他来源：{links}")
         lines.append("")
-    lines.extend(["## 方法说明", "", "原始发现先保存审计，再依次通过物理造物门、时间门和热度门；只有三门均通过后才计算各平台 Top 5。", ""])
+    lines.extend(["## 方法说明", "", "原始发现先保存审计，再依次通过物理造物门、时间门和热度门；三门均通过后跨平台去重、统一评分并取全局前 15。", ""])
     return "\n".join(lines)
 
 

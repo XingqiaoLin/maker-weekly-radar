@@ -4,6 +4,7 @@ import http.client
 import tempfile
 import unittest
 import urllib.error
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -82,7 +83,7 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertEqual(len(payload["items"]), 2)
         self.assertEqual([item["title"] for item in payload["items"]], ["Project 4", "Project 3"])
 
-    def test_physical_gate_failures_do_not_occupy_platform_top_five(self):
+    def test_physical_gate_failures_do_not_occupy_global_top_fifteen(self):
         with tempfile.TemporaryDirectory() as raw_dir:
             root = Path(raw_dir)
             evidence = {"checks": {"creator_made_physical": True, "physical_is_core": True, "built_result_visible": True, "human_process_visible": True}, "evidence": [{"type": "video", "url": "https://example.com/build.mp4"}]}
@@ -116,6 +117,124 @@ class MakerWeeklyTests(unittest.TestCase):
             self.assertEqual(rejected["physical_gate"]["status"], "fail")
             self.assertEqual(len(physical["items"]), 2)
             self.assertEqual({item["title"] for item in payload["items"]}, {"Physical robot one", "Physical robot two"})
+
+    def test_global_candidate_ranking_without_mix_has_no_per_platform_quota(self):
+        captured = "2026-08-12T00:00:00Z"
+        items = []
+        names = [
+            "walking robot", "solar kiln", "wearable loom", "kinetic sculpture", "assistive gripper",
+            "wooden telescope", "ceramic printer", "underwater rover", "mechanical clock", "smart beehive",
+            "portable foundry", "adaptive bicycle", "paper automaton", "recycled kayak", "braille keyboard",
+            "garden monitor", "camera slider", "wind turbine", "musical staircase", "folding wheelchair",
+        ]
+        for index in range(20):
+            platform = "YouTube" if index < 16 else "Reddit"
+            metrics = {"views": 1_000_000 - index * 10_000} if platform == "YouTube" else {"score": 5000, "comments": 500}
+            items.append({
+                "id": f"item-{index}", "source_id": platform.lower(), "platform": platform,
+                "title": f"I built a {names[index]}", "url": f"https://example.test/{index}",
+                "published_at": "2026-08-08T00:00:00Z", "metrics_captured_at": captured,
+                "metrics": metrics, "physical_gate": {
+                    "status": "pass", "checks": {
+                        "creator_made_physical": True, "physical_is_core": True,
+                        "built_result_visible": True, "human_process_visible": True,
+                    },
+                }, "evidence": [f"https://example.test/{index}/evidence"],
+            })
+        payload = {
+            "window_start": "2026-08-03T00:00:00Z", "config_summary": {"final_top": 15},
+            "source_status": [
+                {"source_id": "youtube", "platform": "YouTube", "status": "ok"},
+                {"source_id": "reddit", "platform": "Reddit", "status": "ok"},
+            ], "items": items,
+        }
+        result = maker_weekly.editorial_candidates_envelope(payload, datetime(2026, 8, 9, 23, 59, 59, tzinfo=timezone.utc))
+        self.assertEqual(len(result["items"]), 15)
+        self.assertGreater(sum(item["platform"] == "YouTube" for item in result["items"]), 5)
+        self.assertEqual(result["selection_method"], "physical-time-heat-global-top15-v1")
+        self.assertTrue(all("radar_score" in item for item in result["items"]))
+
+    def test_candidate_mix_reserves_targets_then_refills_globally(self):
+        captured = "2026-08-12T00:00:00Z"
+        specs = [
+            ("YouTube", 8), ("Reddit", 6), ("Kickstarter", 1), ("Hackaday", 1),
+            ("Instructables", 2), ("Hackster.io", 1), ("Make Magazine", 1),
+        ]
+        items = []
+        index = 0
+        names = [
+            "walking robot", "solar kiln", "wearable loom", "kinetic sculpture", "assistive gripper",
+            "wooden telescope", "ceramic printer", "underwater rover", "mechanical clock", "smart beehive",
+            "portable foundry", "adaptive bicycle", "paper automaton", "recycled kayak", "braille keyboard",
+            "garden monitor", "camera slider", "wind turbine", "musical staircase", "folding wheelchair",
+        ]
+        for platform, count in specs:
+            for platform_index in range(count):
+                metrics = {"views": 500_000 - index * 1000} if platform == "YouTube" else {}
+                if platform == "Reddit":
+                    metrics = {"score": 3000, "comments": 500}
+                elif platform == "Kickstarter":
+                    metrics = {"currency": "USD", "usd_pledged": 20_000, "backers": 100}
+                elif platform in {"Instructables", "Hackster.io"}:
+                    metrics = {"featured": True}
+                items.append({
+                    "id": f"mix-{index}", "source_id": platform.lower(), "platform": platform,
+                    "title": f"I built a {names[index]}",
+                    "url": f"https://example.test/mix/{index}", "published_at": "2026-08-08T00:00:00Z",
+                    "metrics_captured_at": captured, "metrics": metrics,
+                    "physical_gate": {"status": "pass", "checks": {
+                        "creator_made_physical": True, "physical_is_core": True,
+                        "built_result_visible": True, "human_process_visible": True,
+                    }}, "evidence": [f"https://example.test/mix/{index}/build"],
+                })
+                index += 1
+        mix = {"enabled": True, "initial_slots": {
+            "youtube": 5, "reddit": 4, "crowdfunding": 1, "hackaday": 1, "other": 4,
+        }}
+        statuses = [{"source_id": name.lower(), "platform": name, "status": "ok"} for name, _ in specs]
+        result = maker_weekly.editorial_candidates_envelope({
+            "window_start": "2026-08-03T00:00:00Z",
+            "config_summary": {"final_top": 15, "candidate_mix": mix},
+            "source_status": statuses, "items": items,
+        }, datetime(2026, 8, 9, 23, 59, 59, tzinfo=timezone.utc))
+        buckets = Counter(item["candidate_mix_bucket"] for item in result["items"])
+        self.assertEqual(len(result["items"]), 15)
+        self.assertEqual(buckets["youtube"], 5)
+        self.assertEqual(buckets["reddit"], 4)
+        self.assertEqual(buckets["crowdfunding"], 1)
+        self.assertEqual(buckets["hackaday"], 1)
+        self.assertEqual(buckets["other"], 4)
+        self.assertEqual({item["platform"] for item in result["items"] if item["candidate_mix_bucket"] == "other"}, {"Instructables", "Hackster.io", "Make Magazine"})
+        self.assertEqual(result["selection_method"], "physical-time-heat-soft-mix-top15-v1")
+
+        # If crowdfunding and Hackaday are empty, their initial slots return to
+        # global ranking. YouTube and Reddit are allowed to exceed 5 and 4.
+        reduced = [item for item in items if item["platform"] not in {"Kickstarter", "Hackaday"}]
+        refilled = maker_weekly.editorial_candidates_envelope({
+            "window_start": "2026-08-03T00:00:00Z",
+            "config_summary": {"final_top": 15, "candidate_mix": mix},
+            "source_status": statuses, "items": reduced,
+        }, datetime(2026, 8, 9, 23, 59, 59, tzinfo=timezone.utc))
+        self.assertEqual(len(refilled["items"]), 15)
+        youtube_count = sum(item["platform"] == "YouTube" for item in refilled["items"])
+        reddit_count = sum(item["platform"] == "Reddit" for item in refilled["items"])
+        self.assertGreaterEqual(youtube_count, 5)
+        self.assertGreaterEqual(reddit_count, 4)
+        self.assertTrue(youtube_count > 5 or reddit_count > 4)
+        self.assertTrue(any(item["candidate_mix_slot"] == "global_score_refill" for item in refilled["items"]))
+
+    def test_candidate_mix_configuration_is_validated(self):
+        source = {"id": "manual", "type": "manual", "platform": "Example", "path": "items.json"}
+        with self.assertRaises(maker_weekly.ConfigError):
+            maker_weekly.validate_config({
+                "final_top": 15, "candidate_mix": {"enabled": True, "initial_slots": {"youtube": 20}},
+                "sources": [source],
+            })
+        maker_weekly.validate_config({
+            "final_top": 15, "candidate_mix": {"enabled": True, "initial_slots": {
+                "youtube": 5, "reddit": 4, "crowdfunding": 1, "hackaday": 1, "other": 4,
+            }}, "sources": [source],
+        })
 
     def test_github_rejects_ambiguous_3d_repositories(self):
         response = {
@@ -193,9 +312,9 @@ class MakerWeeklyTests(unittest.TestCase):
         captured = "2026-08-12T00:00:00Z"
         as_of = datetime(2026, 8, 9, 23, 59, 59, tzinfo=timezone.utc)
         cases = [
-            ({"platform": "Kickstarter", "metrics": {"backers": 49}, "metrics_captured_at": captured}, "fail"),
-            ({"platform": "Kickstarter", "metrics": {"backers": 50}, "metrics_captured_at": captured}, "pass"),
-            ({"platform": "Kickstarter", "metrics": {"currency": "CAD", "reported_usd_pledged": 8411, "backers": 47, "currency_conversion": {"status": "unverified", "admissible_for_heat_gate": False}}, "metrics_captured_at": captured}, "fail"),
+            ({"platform": "Kickstarter", "metrics": {"backers": 39}, "metrics_captured_at": captured}, "fail"),
+            ({"platform": "Kickstarter", "metrics": {"backers": 40}, "metrics_captured_at": captured}, "pass"),
+            ({"platform": "Kickstarter", "metrics": {"currency": "CAD", "reported_usd_pledged": 8411, "backers": 47, "currency_conversion": {"status": "unverified", "admissible_for_heat_gate": False}}, "metrics_captured_at": captured}, "pass"),
             ({"platform": "Kickstarter", "metrics": {"currency": "HKD", "reported_usd_pledged": 460475, "backers": 107, "currency_conversion": {"status": "unverified", "admissible_for_heat_gate": False}}, "metrics_captured_at": captured}, "pass"),
             ({"platform": "Kickstarter", "metrics": {"currency": "USD", "usd_pledged": 5000, "backers": 1}, "metrics_captured_at": captured}, "pass"),
             ({"platform": "YouTube", "metrics": {"views": 24999}, "metrics_captured_at": captured}, "fail"),
@@ -696,7 +815,7 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertEqual(item["metric_verification"]["provenance"], "anonymous_discovery")
         self.assertNotIn("score", item["metrics"])
 
-    def test_reddit_official_weekly_rss_top_ten_is_labeled_proxy_heat(self):
+    def test_reddit_official_weekly_rss_rank_is_labeled_proxy_heat(self):
         feed_url = "https://www.reddit.com/r/maker+robotics/top/.rss?t=week&limit=100"
         source = {
             "id": "reddit-rss", "platform": "Reddit", "feed_urls": [feed_url],
@@ -719,7 +838,7 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertEqual(gate["status"], "pass")
         self.assertEqual(gate["heat_method"], "reddit_weekly_rss_rank")
 
-    def test_reddit_weekly_rss_rank_eleven_fails_and_exact_low_score_cannot_be_rescued(self):
+    def test_reddit_weekly_rss_rank_fifty_one_fails_and_exact_low_score_cannot_be_rescued(self):
         feed_url = "https://www.reddit.com/r/maker+robotics/top/.rss?t=week&limit=100"
         base = {
             "platform": "Reddit", "metrics_captured_at": "2026-08-12T10:00:00Z",
@@ -728,13 +847,13 @@ class MakerWeeklyTests(unittest.TestCase):
                 "source_url": feed_url, "exact_score_available": False,
             },
         }
-        rank_eleven = {**base, "metrics": {"weekly_rss_rank": 11, "rss_feed_url": feed_url}}
+        rank_fifty_one = {**base, "metrics": {"weekly_rss_rank": 51, "rss_feed_url": feed_url}}
         exact_low = {
             **base,
             "metrics": {"score": 400, "comments": 99, "weekly_rss_rank": 1, "rss_feed_url": feed_url},
         }
         as_of = datetime(2026, 8, 9, tzinfo=timezone.utc)
-        self.assertEqual(maker_weekly.evaluate_heat_gate(rank_eleven, as_of)["status"], "fail")
+        self.assertEqual(maker_weekly.evaluate_heat_gate(rank_fifty_one, as_of)["status"], "fail")
         self.assertEqual(maker_weekly.evaluate_heat_gate(exact_low, as_of)["status"], "fail")
 
     def test_reddit_rank_proxy_rejects_non_combined_or_nonofficial_feed(self):
@@ -880,6 +999,28 @@ class MakerWeeklyTests(unittest.TestCase):
             with self.assertRaises(maker_weekly.AccessBlocked):
                 maker_weekly.collect_web_html(source, context)
 
+    def test_dated_archive_expands_every_target_week_day_and_filters_detail_dates(self):
+        source = {
+            "id": "archive", "type": "dated_archive", "platform": "Hackaday",
+            "archive_url_template": "https://example.test/{year}/{month}/{day}/",
+            "link_pattern": r"^https://example\.test/2026/08/[0-9]{2}/project$", "keywords": ["robot"],
+        }
+        context = {
+            "timeout": 10, "limit": 20, "since": datetime(2026, 8, 3, tzinfo=timezone.utc),
+            "as_of": datetime(2026, 8, 9, 23, 59, 59, tzinfo=timezone.utc),
+        }
+        urls = maker_weekly.archive_urls(source, context)
+        self.assertEqual(len(urls), 7)
+        archives = [f'<a href="{url}project">Project</a>'.encode() for url in urls]
+        detail = b'''<html><head><meta property="og:title" content="I built a robot"/>
+        <meta property="article:published_time" content="2026-08-05T12:00:00Z"/>
+        <meta property="og:image" content="https://example.test/robot.jpg"/></head>
+        <body>I designed, fabricated, assembled and tested this working robot prototype.</body></html>'''
+        with mock.patch.object(maker_weekly, "request_bytes", side_effect=archives + [detail] * 7):
+            items = maker_weekly.collect_dated_archive(source, context)
+        self.assertGreaterEqual(len(items), 1)
+        self.assertTrue(all(item["published_at"] == "2026-08-05T12:00:00Z" for item in items))
+
     def test_kickstarter_kicktraq_uses_official_widget_metrics(self):
         listing = b'''<html><a href="/projects/maker/robot-arm/">Robot Arm</a></html>'''
         payload = {
@@ -908,6 +1049,48 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertEqual(items[0]["metrics"]["usd_pledged"], 30000)
         self.assertEqual(items[0]["metric_verification"]["status"], "ok")
         self.assertIn("/widget/card.html?v=2", request.call_args_list[1].args[0])
+
+    def test_kickstarter_same_issue_cache_recovers_failed_widget(self):
+        listing = b'''<html><a href="/projects/maker/robot-arm/">Robot Arm</a></html>'''
+        payload = {
+            "name": "Open Hardware Robot Arm", "blurb": "A DIY robot arm built and tested from scratch.",
+            "goal": 10000, "pledged": 30000, "state": "live", "currency": "USD", "backers_count": 250,
+            "usd_pledged": "30000", "staff_pick": True, "launched_at": 1785859200,
+            "deadline": 1788451200, "creator": {"name": "Small Maker Team"},
+            "category": {"parent_name": "Technology", "name": "Robots"},
+            "urls": {"web": {"project": "https://www.kickstarter.com/projects/maker/robot-arm"}},
+        }
+        source = {
+            "id": "kickstarter", "type": "kickstarter_kicktraq", "platform": "Kickstarter",
+            "listing_url": "https://www.kicktraq.com/categories/technology/robots/?sort=new",
+            "keywords": ["robot"], "detail_workers": 1,
+        }
+        context = {
+            "timeout": 10, "limit": 5, "since": datetime(2026, 8, 3, tzinfo=timezone.utc),
+            "as_of": datetime(2026, 8, 9, 23, 59, 59, tzinfo=timezone.utc),
+        }
+        with tempfile.TemporaryDirectory() as raw_dir:
+            source["evidence_cache_path"] = str(Path(raw_dir) / "kickstarter.json")
+            widget = f'<script>window.current_project = "{maker_weekly.html.escape(json.dumps(payload))}";</script>'.encode()
+            with mock.patch.object(maker_weekly, "request_bytes", side_effect=[listing, widget]):
+                live = maker_weekly.collect_kickstarter_kicktraq(source, context)
+            blocked = maker_weekly.AccessBlocked("temporary challenge")
+            with mock.patch.object(maker_weekly, "request_bytes", side_effect=[listing, blocked]):
+                cached = maker_weekly.collect_kickstarter_kicktraq(source, context)
+        self.assertEqual(live[0]["metrics"]["backers"], 250)
+        self.assertEqual(cached[0]["metrics"]["backers"], 250)
+        self.assertEqual(cached[0]["metric_verification"]["provenance"], "kickstarter_official_widget_cache")
+
+    def test_kickstarter_cache_rejects_different_issue(self):
+        context = {
+            "since": datetime(2026, 8, 10, tzinfo=timezone.utc),
+            "as_of": datetime(2026, 8, 16, tzinfo=timezone.utc),
+        }
+        entry = {
+            "captured_at": "2026-08-12T00:00:00Z", "widget_url": "https://kickstarter.test/widget",
+            "payload": {"launched_at": 1785859200},
+        }
+        self.assertIsNone(maker_weekly.cached_kickstarter_payload(entry, context))
 
     def test_kickstarter_non_usd_widget_amount_is_audit_only(self):
         listing = b'''<html><a href="/projects/maker/stepsafe-kids/">StepSafe Kids</a></html>'''
@@ -941,7 +1124,7 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertFalse(item["metrics"]["currency_conversion"]["admissible_for_heat_gate"])
         self.assertEqual(item["metrics"]["currency_conversion"]["widget_static_usd_rate"], 0.7314)
         gate = maker_weekly.evaluate_heat_gate(item, context["as_of"])
-        self.assertEqual(gate["status"], "fail")
+        self.assertEqual(gate["status"], "pass")
         self.assertEqual(gate["amount_basis"], "non_usd_conversion_unverified")
 
     def test_kickstarter_verified_non_usd_conversion_requires_complete_audit_fields(self):
@@ -1202,6 +1385,20 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertEqual(gate["status"], "fail")
         self.assertIn("真实指标采集时间", gate["observed"])
 
+    def test_zero_gate_rejects_mailbag_even_when_products_and_build_words_appear(self):
+        item = {
+            "title": "What's in the Mail? EBIKE ESC, Spot Welder & More!", "platform": "YouTube",
+            "url": "https://youtube.test/watch?v=mailbag", "author": "Electronics Channel",
+        }
+        page = {
+            "source_url": item["url"], "author": item["author"],
+            "text": "What's in the mail? Unboxing a motor controller, battery, welder and DIY hardware.",
+            "media_urls": ["https://i.ytimg.com/vi/mailbag/maxresdefault.jpg"], "structured_steps": 3,
+        }
+        gate = maker_weekly.derive_physical_gate(item, page)
+        self.assertEqual(gate["status"], "fail")
+        self.assertTrue(gate.get("exclusion_matches"))
+
     def test_formal_default_has_all_13_platforms_and_broad_social_rss(self):
         config_path = Path(__file__).parents[1] / "assets" / "config.example.json"
         config = maker_weekly.load_config(config_path)
@@ -1212,11 +1409,11 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertTrue(by_id["reddit-rss"]["enabled"])
         self.assertEqual(by_id["reddit-rss"]["detail_enrichment"], "reddit_fallback")
         self.assertTrue(by_id["reddit-rss"]["weekly_rss_rank_fallback"]["enabled"])
-        self.assertEqual(config["heat_thresholds"]["reddit"]["weekly_rss_rank"], 10)
+        self.assertEqual(config["heat_thresholds"]["reddit"]["weekly_rss_rank"], 50)
         self.assertEqual(by_id["instagram-web"]["type"], "instagram_fallback")
         self.assertNotIn("required_patterns", by_id["youtube-rss"])
         self.assertNotIn("required_patterns", by_id["reddit-rss"])
-        self.assertGreaterEqual(len(by_id["youtube-rss"]["feed_urls"]), 29)
+        self.assertGreaterEqual(len(by_id["youtube-rss"]["feed_urls"]), 80)
         self.assertGreater(by_id["youtube-rss"]["feed_pause_seconds"], 0)
         self.assertGreaterEqual(by_id["youtube-rss"]["feed_recovery_rounds"], 2)
         self.assertLessEqual(by_id["youtube-rss"]["detail_workers"], 2)

@@ -1,18 +1,29 @@
 {
   "lookback_days": 7,
   "require_all_platforms": true,
-  "discovery_per_source": 50,
+  "discovery_per_source": 150,
   "strict_current_week_only": true,
-  "top_per_source": 5,
   "final_top": 15,
+  "candidate_mix": {
+    "enabled": true,
+    "initial_slots": {
+      "youtube": 5,
+      "reddit": 4,
+      "crowdfunding": 1,
+      "hackaday": 1,
+      "other": 4
+    },
+    "shortfall_policy": "global_score_refill",
+    "other_policy": "platform_round_robin"
+  },
   "request_timeout_seconds": 20,
   "physical_detail_timeout_seconds": 12,
   "physical_detail_workers": 8,
   "heat_thresholds": {
-    "kickstarter": {"usd_pledged": 5000, "backers": 50},
+    "kickstarter": {"usd_pledged": 5000, "backers": 40},
     "indiegogo": {"usd_pledged": 20000, "backers": 200},
     "youtube": {"views": 25000, "channel_subscribers": 10000},
-    "reddit": {"score_plus_comments": 500, "weekly_rss_rank": 10}
+    "reddit": {"score_plus_comments": 500, "weekly_rss_rank": 50}
   },
   "keywords": ["maker", "diy", "open hardware", "robot", "robotics", "wearable", "mechanical", "electronics", "fabrication", "3d print", "cnc", "kinetic"],
   "sources": [
@@ -39,7 +50,7 @@
       "enabled": true,
       "platform": "YouTube",
       "detail_enrichment": "youtube_public",
-      "detail_candidate_limit": 60,
+      "detail_candidate_limit": 120,
       "detail_workers": 2,
       "feed_pause_seconds": 1.5,
       "feed_recovery_rounds": 2,
@@ -77,7 +88,58 @@
         "https://www.youtube.com/feeds/videos.xml?channel_id=UCFtc3XdXgLFwhlDajMGK69w",
         "https://www.youtube.com/feeds/videos.xml?channel_id=UCVSHXNNBitaPd5lYz48--yg",
         "https://www.youtube.com/feeds/videos.xml?channel_id=UCzml9bXoEM0itbcE96CB03w",
-        "https://www.youtube.com/feeds/videos.xml?channel_id=UCu7_D0o48KbfhpEohoP7YSQ"
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCu7_D0o48KbfhpEohoP7YSQ",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCJ0-OtVpF0wOKEqT2Z1HEtA",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCS0N5baNlQWJCUrhCEo8WlA",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCfYfK0tzHZTpNFrc_NDKfTA",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCmkP178NasnhR3TWQyyP4Gw",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCjiVhIvGmRZixSzupD0sS9Q",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCtM5z2gkrGRuWd0JQMx76qA",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCu94OHbBYVUXLYPh4NBu10w",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UC4Otk-uDioJN0tg6s1QO9lw",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCp_5PO66faM4dBFbFFBdPSQ",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCbtEd1MuY6gd2RpdWqkzXFw",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCUW49KGPezggFi0PGyDvcvg",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UC_4YBM08hcpJqLl3vvgTqXg",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCtHaxi4GTYDpJgMSGy7AeSw",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCfG1Kb2UNQNYAPccG7wgfwQ",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCqfMW0tMZEciSXQym8x0EoQ",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UC6QNjBn6KMq5-pe3OE11zZg",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCeKpbMimEGgLM_0tnghfoVw",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UC7Jf7t6BL4e74O53dL6arSw",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCworsKCR-Sx6R6-BnIjS2MA",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCckETVOT59aYw80B36aP9vw",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCtaykeSsGhtn2o2BsPm-rsw",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UC39z4_U8Kls0llAij3RRZAQ",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCHYSw4XKO_q1GaChw5pxa-w",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UC79qFuymkVas5dCScbLF9fw",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCggHsHce2n3vvbJf_8YKrMA",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCafxR2HWJRmMfSdyZXvZMTw",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UC0G7e3uCtTyKQy2vZbRaKxg",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCSksodwjNeOQ3Oywr1G4Nag",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCPOTPYuDsKnXP9I-ph4yMgg",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCS98_Z8S7kR9__wsKZeAOYQ",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCVS89U86PwqzNkK2qYNbk5A",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UC6I0KzAD7uFTL1qzxyunkvA",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCiEk4xHBbz0hZNIBBpowdYQ",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCivA7_KLKWo43tFcCkFvydw",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UC06HVrkOL33D5lLnCPjr6NQ",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCg45A-ph7Eu8jQgfrwDkHLg",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCF2KlrD2XPmgjnJqn_85wBw",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCsOFElmDD3e8l-RGCabCZ9g",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCZSC0Pmai2JL2aCLbihSUYA",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UC89AgkG34oooZubVt23wzFw",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UC3jc4X-kEq-dEDYhQ8QoYnQ",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCV5vCi3jPJdURZwAOO_FNfQ",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UC26YLK0OEbLB3TCYxGh8xVQ",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCuvVGwgd5JY40lf_99og7ow",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCsnKS1fVNJ1yjCkGOXXDd4A",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UChZtzs4LEvhgUltMC8y6tcQ",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCJVMzT7dIlQBkXVQCZIOmtA",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCivi_f1nniBzEOfKhRoN12Q",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCW8-pJyPdYAdubad1veFB3A",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCYH-XXUE2QDaWKvABsWJh8w",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCEVelHmwuCqyje6YTAP2UIA"
       ]
     },
     {
@@ -114,6 +176,7 @@
       ],
       "detail_candidate_limit": 49,
       "detail_workers": 6,
+      "evidence_cache_path": "../state/kickstarter-widget-cache.json",
       "keywords": ["diy", "robot", "hardware", "3d print", "printer", "cnc", "laser", "wearable", "electronics", "fabrication", "open source", "device", "machine"]
     },
     {
@@ -129,7 +192,13 @@
       "type": "rss",
       "enabled": true,
       "platform": "Hackster.io",
-      "feed_url": "https://www.hackster.io/projects?format=atom&by=featured&sort=published",
+      "feed_urls": [
+        "https://www.hackster.io/projects?format=atom&by=featured&sort=published&page=1",
+        "https://www.hackster.io/projects?format=atom&by=featured&sort=published&page=2",
+        "https://www.hackster.io/projects?format=atom&by=featured&sort=published&page=3",
+        "https://www.hackster.io/projects?format=atom&by=featured&sort=published&page=4",
+        "https://www.hackster.io/projects?format=atom&by=featured&sort=published&page=5"
+      ],
       "static_metrics": {"featured": true}
     },
     {
@@ -179,33 +248,45 @@
     },
     {
       "id": "hackaday",
-      "type": "rss",
+      "type": "dated_archive",
       "enabled": true,
       "platform": "Hackaday",
-      "feed_url": "https://hackaday.com/blog/feed/",
+      "archive_url_template": "https://hackaday.com/{year}/{month}/{day}/",
+      "link_pattern": "^https://hackaday\\.com/[0-9]{4}/[0-9]{2}/[0-9]{2}/[^/]+/?$",
+      "detail_candidate_limit": 100,
       "keywords": ["build", "diy", "maker", "robot", "hardware", "mechanical", "electronics", "3d print", "cnc", "wearable"]
     },
     {
       "id": "make-magazine",
-      "type": "rss",
+      "type": "dated_archive",
       "enabled": true,
       "platform": "Make Magazine",
-      "feed_url": "https://makezine.com/feed/"
+      "archive_url_templates": [
+        "https://makezine.com/post-sitemap74.xml",
+        "https://makezine.com/projects-sitemap3.xml"
+      ],
+      "link_pattern": "^https://makezine\\.com/(?:article/[^/]+/[^/]+|projects/[^/]+)/?$",
+      "detail_candidate_limit": 150,
+      "keywords": ["build", "built", "maker", "diy", "robot", "hardware", "wearable", "fabricat", "3d print", "electronics"]
     },
     {
       "id": "the-verge",
-      "type": "rss",
+      "type": "dated_archive",
       "enabled": true,
       "platform": "The Verge",
-      "feed_url": "https://www.theverge.com/rss/index.xml",
+      "archive_url_template": "https://www.theverge.com/sitemaps/entries/{year}/{month_int}",
+      "link_pattern": "^https://www\\.theverge\\.com/[^/]+/[0-9]+/[^/]+/?$",
+      "detail_candidate_limit": 150,
       "keywords": ["maker", "diy", "robot", "hardware", "wearable", "built", "mod"]
     },
     {
       "id": "toms-hardware",
-      "type": "rss",
+      "type": "dated_archive",
       "enabled": true,
       "platform": "Tom's Hardware",
-      "feed_url": "https://www.tomshardware.com/feeds/all",
+      "archive_url_template": "https://www.tomshardware.com/news/archive/{year}/{month}",
+      "link_pattern": "^https://www\\.tomshardware\\.com/(?:news|pc-components|maker-stem|peripherals)/[^/?#]+/?$",
+      "detail_candidate_limit": 150,
       "keywords": ["maker", "diy", "robot", "raspberry pi", "arduino", "3d print", "mod"]
     }
   ]

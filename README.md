@@ -2,7 +2,7 @@
 
 Maker Weekly Radar is a Codex Skill and Plugin for producing a rigorously sourced weekly Top 15 of physical Maker Projects.
 
-It searches 13 public platforms, preserves raw discoveries for audit, requires direct evidence of a real physical build before time/heat ranking, then takes each platform's strongest five eligible candidates. Five mandatory review gates, three red lines, and a 30-point editorial score determine the final list. Fewer than 15 projects are returned when the evidence is insufficient.
+It searches 13 public platforms, preserves raw discoveries for audit, requires direct evidence of a real physical build before time/heat ranking, then deduplicates and scores every eligible project. The candidate Top 15 starts with minimum targets of YouTube 5, Reddit 4, crowdfunding 1, Hackaday 1, and four round-robin slots for other platforms. Remaining or unfilled slots refill by global score, so YouTube and Reddit may exceed 5 and 4; these targets never bypass eligibility gates. Five mandatory review gates, three red lines, and a 30-point editorial score determine the final list. Fewer than 15 projects are returned when the evidence is insufficient.
 
 ## What Codex can do with it
 
@@ -10,7 +10,7 @@ It searches 13 public platforms, preserves raw discoveries for audit, requires d
 - Collect from Kickstarter, Indiegogo, GitHub, Hackaday, Hackster, Instructables, YouTube, Reddit, X, Instagram, Make Magazine, The Verge, and Tom's Hardware.
 - Use public no-key collection where it is reliable, with optional official API providers.
 - Report exact RSS bundle coverage. A partial YouTube/Reddit feed result is retained for audit but marked `error`, never `ok`; failed URLs and HTTP statuses are written to the audit artifacts.
-- Avoid per-repository GitHub README API calls, use 29+ verified YouTube channel feeds, cover 20+ Reddit communities through rate-limit-friendly bundles, and use official Kickstarter update feeds when campaign pages are challenged.
+- Avoid per-repository GitHub README API calls, use 80 verified YouTube channel feeds, cover 20+ Reddit communities through rate-limit-friendly bundles, and use official Kickstarter update feeds when campaign pages are challenged.
 - Accept project media plus documented multi-step fabrication as built-result evidence, and verify Reddit heat through approved Installed-App OAuth or audited original-page browser evidence.
 - Bound eligibility by the project's first-publication week while observing heat at report execution time, with the real metric capture timestamp preserved.
 - Verify public heat metrics instead of treating feed position as popularity.
@@ -56,7 +56,7 @@ YouTube defaults to slower desktop-safe collection: 1.5-second feed pacing, two 
 
 Platform coverage and item eligibility are tracked separately. Partial YouTube/Reddit coverage remains visibly `error`/`blocked` and is not counted as a completed platform, while a project from the successful portion may still reach editorial review only when that project's own physical, time, heat, authorship, and evidence gates pass. Such candidates are labeled `partial_platform_coverage`.
 
-The bundled expanded-discovery heat profile uses Kickstarter `auditable US$5,000 or 50 backers`, YouTube `25,000 views or 10,000 channel subscribers`, and Reddit `score + comments >= 500`; when exact Reddit interactions are blocked, the official combined `top/week` RSS rank `<= 10` is an explicit proxy fallback. Exact metrics always take precedence, so a verified sub-threshold score cannot be rescued by RSS rank. A non-USD Kickstarter widget equivalent is audit-only unless separate exchange-rate evidence supplies a source and capture time; backers remain independently eligible. These lower gates increase the research pool only; every final selection still needs an original physical result, current-week first publication, maker authorship, visible process, five gates, three red lines, excellence evidence, and strict scoring.
+The bundled expanded-discovery heat profile uses Kickstarter `auditable US$5,000 or 40 backers`, YouTube `25,000 views or 10,000 channel subscribers`, and Reddit `score + comments >= 500`; when exact Reddit interactions are blocked, the official combined `top/week` RSS rank `<= 50` is an explicit proxy fallback. Exact metrics always take precedence, so a verified sub-threshold score cannot be rescued by RSS rank. A non-USD Kickstarter widget equivalent is audit-only unless separate exchange-rate evidence supplies a source and capture time; backers remain independently eligible. These lower gates increase the research pool only; every final selection still needs an original physical result, current-week first publication, maker authorship, visible process, five gates, three red lines, excellence evidence, and strict scoring.
 
 `--as-of` is the target publication cutoff. It is not a historical heat cutoff: metrics collected after that date remain eligible when the project's original publication date is inside the target week, and every metric keeps its actual `metrics_captured_at`.
 

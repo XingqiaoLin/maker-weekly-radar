@@ -50,15 +50,15 @@ class StrictWeeklyTests(unittest.TestCase):
 
     def test_heat_gates_are_hard_thresholds(self):
         github = strict_weekly.heat_gate({"platform": "GitHub", "metrics": {"stars": 999}, "url": "https://github.com/x/y"})
-        kickstarter_low = strict_weekly.heat_gate({"platform": "Kickstarter", "metrics": {"backers": 49}, "url": "https://kickstarter.com/x"})
-        kickstarter = strict_weekly.heat_gate({"platform": "Kickstarter", "metrics": {"backers": 50}, "url": "https://kickstarter.com/x"})
+        kickstarter_low = strict_weekly.heat_gate({"platform": "Kickstarter", "metrics": {"backers": 39}, "url": "https://kickstarter.com/x"})
+        kickstarter = strict_weekly.heat_gate({"platform": "Kickstarter", "metrics": {"backers": 40}, "url": "https://kickstarter.com/x"})
         youtube_rss = strict_weekly.heat_gate({"platform": "YouTube", "metrics": {"feed_host": "youtube.com"}, "url": "https://youtube.com/x"})
         self.assertEqual(github["status"], "fail")
         self.assertEqual(kickstarter_low["status"], "fail")
         self.assertEqual(kickstarter["status"], "pass")
         self.assertEqual(youtube_rss["status"], "unknown")
 
-    def test_strict_reddit_gate_accepts_labeled_official_weekly_top_ten_proxy(self):
+    def test_strict_reddit_gate_accepts_labeled_official_weekly_rank_proxy(self):
         feed_url = "https://www.reddit.com/r/maker+robotics/top/.rss?t=week&limit=100"
         item = {
             "platform": "Reddit", "url": "https://www.reddit.com/r/maker/comments/post123/machine/",
@@ -87,7 +87,7 @@ class StrictWeeklyTests(unittest.TestCase):
                 "currency_conversion": {"status": "unverified", "admissible_for_heat_gate": False},
             },
         }
-        self.assertEqual(strict_weekly.heat_gate(step_safe)["status"], "fail")
+        self.assertEqual(strict_weekly.heat_gate(step_safe)["status"], "pass")
         self.assertEqual(strict_weekly.heat_gate(xtra_maker)["status"], "pass")
 
     def test_time_gate_allows_only_current_week_first_release(self):

@@ -83,7 +83,7 @@ def heat_gate(item: dict[str, Any]) -> dict[str, Any]:
         reported_usd, backers = number(metrics, "reported_usd_pledged", "usd_pledged", "pledged_usd"), number(metrics, "backers")
         threshold = maker_weekly.HEAT_THRESHOLDS["kickstarter"]
         result.update(
-            threshold="可审计 US$5,000 或 50 名支持者",
+            threshold="可审计 US$5,000 或 40 名支持者",
             observed=f"eligible_usd={pledged}; reported_usd={reported_usd}; currency={metrics.get('currency')}; backers={backers}",
             amount_basis=amount_basis,
         )
