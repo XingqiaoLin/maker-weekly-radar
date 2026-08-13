@@ -223,6 +223,52 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertTrue(youtube_count > 5 or reddit_count > 4)
         self.assertTrue(any(item["candidate_mix_slot"] == "global_score_refill" for item in refilled["items"]))
 
+        # Crowdfunding and Hackaday also have minimum targets, not maximums.
+        # When they own the remaining quality-ranked inventory, both can grow
+        # beyond their initial one-slot reservation.
+        expanded = []
+        for platform, count in (("YouTube", 5), ("Reddit", 4)):
+            expanded.extend([item for item in items if item["platform"] == platform][:count])
+        distinct_titles = {
+            "Kickstarter": [
+                "I built a solar ceramic kiln",
+                "I built a wearable lifting exoskeleton",
+                "I built a recycled plastic canoe",
+            ],
+            "Hackaday": [
+                "I built a mechanical astronomical clock",
+                "I built a kinetic light sculpture",
+                "I built a refreshable braille typewriter",
+            ],
+        }
+        for platform in ("Kickstarter", "Hackaday"):
+            template = next(item for item in items if item["platform"] == platform)
+            for suffix, title in enumerate(distinct_titles[platform]):
+                clone = json.loads(json.dumps(template))
+                clone["id"] = f"{platform.lower()}-extra-{suffix}"
+                clone["title"] = title
+                clone["url"] = f"https://example.test/{platform.lower()}/{suffix}"
+                clone["evidence"] = [f"{clone['url']}/build"]
+                expanded.append(clone)
+        expanded_result = maker_weekly.editorial_candidates_envelope({
+            "window_start": "2026-08-03T00:00:00Z",
+            "config_summary": {"final_top": 15, "candidate_mix": mix},
+            "source_status": statuses, "items": expanded,
+        }, datetime(2026, 8, 9, 23, 59, 59, tzinfo=timezone.utc))
+        expanded_buckets = Counter(item["candidate_mix_bucket"] for item in expanded_result["items"])
+        self.assertEqual(expanded_buckets["crowdfunding"], 3)
+        self.assertEqual(expanded_buckets["hackaday"], 3)
+        self.assertTrue(any(
+            item["candidate_mix_bucket"] == "crowdfunding"
+            and item["candidate_mix_slot"] == "global_score_refill"
+            for item in expanded_result["items"]
+        ))
+        self.assertTrue(any(
+            item["candidate_mix_bucket"] == "hackaday"
+            and item["candidate_mix_slot"] == "global_score_refill"
+            for item in expanded_result["items"]
+        ))
+
     def test_candidate_mix_configuration_is_validated(self):
         source = {"id": "manual", "type": "manual", "platform": "Example", "path": "items.json"}
         with self.assertRaises(maker_weekly.ConfigError):
