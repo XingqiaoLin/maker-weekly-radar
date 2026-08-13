@@ -40,7 +40,10 @@
       "platform": "YouTube",
       "detail_enrichment": "youtube_public",
       "detail_candidate_limit": 60,
-      "detail_workers": 6,
+      "detail_workers": 3,
+      "feed_pause_seconds": 0.25,
+      "feed_recovery_rounds": 1,
+      "feed_recovery_pause_seconds": 5,
       "feed_urls": [
         "https://www.youtube.com/feeds/videos.xml?channel_id=UCxQbYGpbdrh-b2ND-AfIybg",
         "https://www.youtube.com/feeds/videos.xml?channel_id=UCbgBDBrwsikmtoLqtpc59Bw",
@@ -64,7 +67,7 @@
         "https://www.youtube.com/feeds/videos.xml?channel_id=UC67gfx2Fg7K2NSHqoENVgwA",
         "https://www.youtube.com/feeds/videos.xml?channel_id=UCNyGbxoEo6CQvaRVEvItxkA",
         "https://www.youtube.com/feeds/videos.xml?channel_id=UC2avWDLN1EI3r1RZ_dlSxCw",
-        "https://www.youtube.com/feeds/videos.xml?channel_id=UCtHaxi4GTYDpJgMSGy7AeSw",
+        "https://www.youtube.com/feeds/videos.xml?channel_id=UCY1kMZp36IQSyNx_9h4mpCg",
         "https://www.youtube.com/feeds/videos.xml?channel_id=UCEn3fRj2e0mpqYsijxnzayg",
         "https://www.youtube.com/feeds/videos.xml?channel_id=UC7yF9tV4xWEMZkel7q8La_w",
         "https://www.youtube.com/feeds/videos.xml?channel_id=UCFtc3XdXgLFwhlDajMGK69w",
@@ -82,13 +85,12 @@
       "installed_client_id_env": "REDDIT_INSTALLED_CLIENT_ID",
       "browser_evidence_env": "MAKER_WEEKLY_BROWSER_EVIDENCE",
       "detail_candidate_limit": 80,
-      "detail_workers": 6,
-      "feed_pause_seconds": 1,
+      "detail_workers": 2,
+      "feed_pause_seconds": 2,
+      "feed_recovery_rounds": 2,
+      "feed_recovery_pause_seconds": 15,
       "feed_urls": [
-        "https://www.reddit.com/r/maker+functionalprint+somethingimade+engineering+3Dprinting/top/.rss?t=week",
-        "https://www.reddit.com/r/DIY+arduino+robotics+raspberry_pi+diyelectronics/top/.rss?t=week",
-        "https://www.reddit.com/r/woodworking+metalworking+cyberDeck+esp32+PrintedCircuitBoard/top/.rss?t=week",
-        "https://www.reddit.com/r/3DPrintsintheShop+Leathercraft+sewing+upcycling+boatbuilding/top/.rss?t=week"
+        "https://www.reddit.com/r/maker+functionalprint+somethingimade+engineering+3Dprinting+DIY+arduino+robotics+raspberry_pi+diyelectronics+woodworking+metalworking+cyberDeck+esp32+PrintedCircuitBoard+3DPrintsintheShop+Leathercraft+sewing+upcycling+boatbuilding/top/.rss?t=week&limit=100"
       ]
     },
     {

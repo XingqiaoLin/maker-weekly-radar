@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-USER_AGENT = "maker-weekly-radar/0.13"
+USER_AGENT = "maker-weekly-radar/0.14"
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "assets" / "config.example.json"
 HEAT_THRESHOLDS = {
     "kickstarter": {"usd_pledged": 5_000, "backers": 50},
@@ -70,6 +70,15 @@ class AccessBlocked(RuntimeError):
     """A provider explicitly denied public, non-authenticated collection."""
 
     pass
+
+
+class RateLimited(AccessBlocked):
+    """A provider asked the collector to wait before a bounded retry."""
+
+    def __init__(self, retry_after: float | None = None):
+        self.retry_after = retry_after
+        detail = f"; Retry-After={retry_after:g}s" if retry_after is not None else ""
+        super().__init__(f"HTTP 429 from provider; public collection was rate-limited{detail}")
 
 
 class ResourceNotFound(RuntimeError):
@@ -209,7 +218,7 @@ def request_bytes(
             if exc.code == 429 and attempt < 2:
                 retry_after = str(exc.headers.get("Retry-After") or "").strip()
                 try:
-                    delay = min(10.0, max(1.0, float(retry_after)))
+                    delay = min(30.0, max(1.0, float(retry_after)))
                 except ValueError:
                     delay = float(2 ** attempt)
                 time.sleep(delay)
@@ -219,7 +228,14 @@ def request_bytes(
                     time.sleep(float(2 ** attempt))
                     continue
                 raise ProviderServerError(exc.code) from exc
-            if exc.code in {401, 403, 429}:
+            if exc.code == 429:
+                retry_after = str(exc.headers.get("Retry-After") or "").strip()
+                try:
+                    parsed_retry_after = max(0.0, float(retry_after))
+                except ValueError:
+                    parsed_retry_after = None
+                raise RateLimited(parsed_retry_after) from exc
+            if exc.code in {401, 403}:
                 raise AccessBlocked(f"HTTP {exc.code} from provider; public collection was blocked or rate-limited") from exc
             if exc.code == 404:
                 raise ResourceNotFound("HTTP 404 from provider") from exc
@@ -1966,6 +1982,8 @@ def collect_rss(source: dict[str, Any], context: dict[str, Any]) -> list[dict[st
         "successful_feeds": 0,
         "failed_feeds": 0,
         "success_ratio": 0.0,
+        "recovery_rounds": 0,
+        "recovered_feeds": 0,
         "failures": [],
     }
     context.setdefault("_source_diagnostics", {})[str(source["id"])] = {"feed_coverage": coverage}
@@ -1982,13 +2000,48 @@ def collect_rss(source: dict[str, Any], context: dict[str, Any]) -> list[dict[st
             time.sleep(min(1.0, float(source.get("youtube_404_recheck_delay_seconds") or 0.5)))
             return ET.fromstring(request_bytes(feed_url, context["timeout"]))
 
-    for feed_url in urls:
+    parsed_feeds: dict[str, ET.Element] = {}
+    failures_by_url: dict[str, dict[str, Any]] = {}
+    retry_after_values: list[float] = []
+
+    def attempt_feed(feed_url: str) -> None:
         try:
-            root = load_feed(feed_url)
+            parsed_feeds[feed_url] = load_feed(feed_url)
+            failures_by_url.pop(feed_url, None)
         except (RuntimeError, ET.ParseError) as exc:
-            coverage["failures"].append(provider_failure_record(feed_url, exc))
+            failures_by_url[feed_url] = provider_failure_record(feed_url, exc)
+            if isinstance(exc, RateLimited) and exc.retry_after is not None:
+                retry_after_values.append(exc.retry_after)
+
+    feed_pause = min(10.0, max(0.0, float(source.get("feed_pause_seconds") or 0)))
+    for index, feed_url in enumerate(urls):
+        attempt_feed(feed_url)
+        if feed_pause > 0 and index + 1 < len(urls):
+            time.sleep(feed_pause)
+
+    retry_urls = [url for url in urls if url in failures_by_url]
+    recovery_rounds = max(0, min(2, int(source.get("feed_recovery_rounds") or 0)))
+    if retry_urls and recovery_rounds:
+        recovery_pause = min(60.0, max(0.0, float(source.get("feed_recovery_pause_seconds") or 5)))
+        for round_index in range(recovery_rounds):
+            coverage["recovery_rounds"] = round_index + 1
+            requested_wait = max(retry_after_values or [0.0])
+            time.sleep(min(60.0, max(recovery_pause, requested_wait)))
+            retry_after_values.clear()
+            before = len(parsed_feeds)
+            for index, feed_url in enumerate(list(retry_urls)):
+                attempt_feed(feed_url)
+                if feed_pause > 0 and index + 1 < len(retry_urls):
+                    time.sleep(feed_pause)
+            coverage["recovered_feeds"] += len(parsed_feeds) - before
+            retry_urls = [url for url in retry_urls if url in failures_by_url]
+            if not retry_urls:
+                break
+
+    for feed_url in urls:
+        root = parsed_feeds.get(feed_url)
+        if root is None:
             continue
-        coverage["successful_feeds"] += 1
         entries = [entry for entry in root.iter() if local_name(entry.tag) in {"item", "entry"}]
         for feed_position, entry in enumerate(entries):
             title = child_value(entry, {"title"})
@@ -2030,9 +2083,8 @@ def collect_rss(source: dict[str, Any], context: dict[str, Any]) -> list[dict[st
                     "author": author,
                 })
                 results.append(item)
-        pause = float(source.get("feed_pause_seconds") or 0)
-        if pause > 0 and feed_url != urls[-1]:
-            time.sleep(min(10.0, pause))
+    coverage["successful_feeds"] = len(parsed_feeds)
+    coverage["failures"] = [failures_by_url[url] for url in urls if url in failures_by_url]
     coverage["failed_feeds"] = len(coverage["failures"])
     coverage["success_ratio"] = round(coverage["successful_feeds"] / coverage["total_feeds"], 4)
     if coverage["successful_feeds"] == 0:

@@ -311,6 +311,57 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertEqual(status["status"], "empty")
         self.assertEqual(status["coverage"]["feed_coverage"]["success_ratio"], 1.0)
 
+    def test_rss_recovery_retries_only_failed_feeds(self):
+        feed = b"<feed xmlns='http://www.w3.org/2005/Atom'></feed>"
+        source = {
+            "id": "youtube-rss", "type": "rss", "platform": "YouTube",
+            "feed_urls": ["https://youtube.test/good", "https://youtube.test/rate-limited"],
+            "feed_recovery_rounds": 1, "feed_recovery_pause_seconds": 0,
+        }
+        context = {
+            "timeout": 10, "limit": 5, "since": datetime(2026, 8, 3, tzinfo=timezone.utc),
+            "as_of": datetime(2026, 8, 9, 23, 59, 59, tzinfo=timezone.utc),
+            "lookback_days": 7, "keywords": [],
+        }
+        with mock.patch.object(
+            maker_weekly, "request_bytes",
+            side_effect=[feed, maker_weekly.RateLimited(0), feed],
+        ) as request, mock.patch.object(maker_weekly.time, "sleep"):
+            self.assertEqual(maker_weekly.collect_rss(source, context), [])
+        self.assertEqual(
+            [call.args[0] for call in request.call_args_list],
+            ["https://youtube.test/good", "https://youtube.test/rate-limited", "https://youtube.test/rate-limited"],
+        )
+        coverage = context["_source_diagnostics"]["youtube-rss"]["feed_coverage"]
+        self.assertEqual(coverage["successful_feeds"], 2)
+        self.assertEqual(coverage["failed_feeds"], 0)
+        self.assertEqual(coverage["recovery_rounds"], 1)
+        self.assertEqual(coverage["recovered_feeds"], 1)
+
+    def test_rss_recovery_keeps_persistent_partial_failure_visible(self):
+        feed = b"<feed xmlns='http://www.w3.org/2005/Atom'></feed>"
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            config = {"sources": [{
+                "id": "reddit-rss", "type": "rss", "platform": "Reddit",
+                "feed_urls": ["https://reddit.test/good", "https://reddit.test/rate-limited"],
+                "feed_recovery_rounds": 2, "feed_recovery_pause_seconds": 0,
+            }]}
+            path = root / "config.json"
+            path.write_text(json.dumps(config), encoding="utf-8")
+            with mock.patch.object(
+                maker_weekly, "request_bytes",
+                side_effect=[feed, maker_weekly.RateLimited(0), maker_weekly.RateLimited(0), maker_weekly.RateLimited(0)],
+            ), mock.patch.object(maker_weekly.time, "sleep"):
+                payload = maker_weekly.collect_raw_envelope(path, datetime(2026, 8, 9, tzinfo=timezone.utc))
+        status = payload["source_status"][0]
+        self.assertEqual(status["status"], "error")
+        coverage = status["coverage"]["feed_coverage"]
+        self.assertEqual(coverage["successful_feeds"], 1)
+        self.assertEqual(coverage["failed_feeds"], 1)
+        self.assertEqual(coverage["recovery_rounds"], 2)
+        self.assertEqual(coverage["recovered_feeds"], 0)
+
     def test_all_blocked_rss_feeds_are_blocked_with_diagnostics(self):
         with tempfile.TemporaryDirectory() as raw_dir:
             root = Path(raw_dir)
@@ -366,6 +417,18 @@ class MakerWeeklyTests(unittest.TestCase):
             with self.assertRaises(maker_weekly.ResourceNotFound):
                 maker_weekly.request_bytes("https://youtube.test/stale", 10)
         self.assertEqual(urlopen.call_count, 1)
+
+    def test_request_bytes_honors_retry_after_and_reports_final_429(self):
+        rate_limit = urllib.error.HTTPError(
+            "https://reddit.test/feed", 429, "too many requests", {"Retry-After": "7"}, None,
+        )
+        with mock.patch.object(maker_weekly.urllib.request, "urlopen", side_effect=[rate_limit, rate_limit, rate_limit]) as urlopen, \
+                mock.patch.object(maker_weekly.time, "sleep") as sleep:
+            with self.assertRaises(maker_weekly.RateLimited) as raised:
+                maker_weekly.request_bytes("https://reddit.test/feed", 10)
+        self.assertEqual(urlopen.call_count, 3)
+        self.assertEqual(raised.exception.retry_after, 7)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [7, 7])
 
     def test_youtube_feed_rechecks_one_transient_404(self):
         feed = b"<feed xmlns='http://www.w3.org/2005/Atom'></feed>"
@@ -994,6 +1057,14 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertNotIn("required_patterns", by_id["youtube-rss"])
         self.assertNotIn("required_patterns", by_id["reddit-rss"])
         self.assertGreaterEqual(len(by_id["youtube-rss"]["feed_urls"]), 29)
+        self.assertGreater(by_id["youtube-rss"]["feed_pause_seconds"], 0)
+        self.assertGreaterEqual(by_id["youtube-rss"]["feed_recovery_rounds"], 1)
+        self.assertLessEqual(by_id["youtube-rss"]["detail_workers"], 3)
+        self.assertGreaterEqual(by_id["reddit-rss"]["feed_pause_seconds"], 2)
+        self.assertGreaterEqual(by_id["reddit-rss"]["feed_recovery_rounds"], 2)
+        self.assertLessEqual(by_id["reddit-rss"]["detail_workers"], 2)
+        self.assertLessEqual(len(by_id["reddit-rss"]["feed_urls"]), 2)
+        self.assertTrue(all("limit=100" in url for url in by_id["reddit-rss"]["feed_urls"]))
         reddit_communities = set()
         for url in by_id["reddit-rss"]["feed_urls"]:
             bundle = url.split("/r/", 1)[1].split("/top/", 1)[0]
