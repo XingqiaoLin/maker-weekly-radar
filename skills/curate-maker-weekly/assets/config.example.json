@@ -12,7 +12,7 @@
     "kickstarter": {"usd_pledged": 5000, "backers": 50},
     "indiegogo": {"usd_pledged": 20000, "backers": 200},
     "youtube": {"views": 25000, "channel_subscribers": 10000},
-    "reddit": {"score_plus_comments": 500}
+    "reddit": {"score_plus_comments": 500, "weekly_rss_rank": 10}
   },
   "keywords": ["maker", "diy", "open hardware", "robot", "robotics", "wearable", "mechanical", "electronics", "fabrication", "3d print", "cnc", "kinetic"],
   "sources": [
@@ -82,6 +82,7 @@
       "enabled": true,
       "platform": "Reddit",
       "detail_enrichment": "reddit_fallback",
+      "weekly_rss_rank_fallback": {"enabled": true},
       "installed_client_id_env": "REDDIT_INSTALLED_CLIENT_ID",
       "browser_evidence_env": "MAKER_WEEKLY_BROWSER_EVIDENCE",
       "detail_candidate_limit": 80,

@@ -107,11 +107,10 @@ def heat_gate(item: dict[str, Any]) -> dict[str, Any]:
         if views is not None or subscribers is not None:
             result["status"] = "pass" if (views or 0) >= threshold["views"] or (subscribers or 0) >= threshold["channel_subscribers"] else "fail"
     elif "reddit" in platform:
-        score, comments = number(metrics, "upvotes", "score"), number(metrics, "comments")
-        threshold = maker_weekly.HEAT_THRESHOLDS["reddit"]["score_plus_comments"]
-        result.update(threshold="公开点赞/分数与评论合计 500", observed=f"score={score}; comments={comments}")
-        if score is not None and comments is not None:
-            result["status"] = "pass" if score + comments >= threshold else "fail"
+        passed, threshold_text, observed = maker_weekly.reddit_heat_observation(item)
+        result.update(status="pass" if passed else "fail", threshold=threshold_text, observed=observed)
+        if "official_rss_proxy" in observed:
+            result.update(heat_method="reddit_weekly_rss_rank", exact_score_available=False)
     elif platform in {"x", "x / twitter", "twitter", "instagram"}:
         interactions = number(metrics, "interactions")
         if interactions is None:

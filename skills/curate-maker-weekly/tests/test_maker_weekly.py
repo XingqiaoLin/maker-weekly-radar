@@ -597,6 +597,65 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertEqual(item["metric_verification"]["provenance"], "anonymous_discovery")
         self.assertNotIn("score", item["metrics"])
 
+    def test_reddit_official_weekly_rss_top_ten_is_labeled_proxy_heat(self):
+        feed_url = "https://www.reddit.com/r/maker+robotics/top/.rss?t=week&limit=100"
+        source = {
+            "id": "reddit-rss", "platform": "Reddit", "feed_urls": [feed_url],
+            "weekly_rss_rank_fallback": {"enabled": True},
+        }
+        context = {"timeout": 10, "config_dir": Path(".")}
+        item = {
+            "id": "candidate", "platform": "Reddit",
+            "url": "https://www.reddit.com/r/maker/comments/post123/machine/",
+            "metrics": {"weekly_rss_rank": 10, "rss_feed_url": feed_url},
+            "metrics_captured_at": "2026-08-12T10:00:00Z", "evidence": [],
+        }
+        with mock.patch.dict(maker_weekly.os.environ, {}, clear=True):
+            maker_weekly.enrich_reddit_fallback(source, [item], context)
+        verification = item["metric_verification"]
+        self.assertEqual(verification["status"], "ok")
+        self.assertEqual(verification["provenance"], "reddit_weekly_rss_rank")
+        self.assertFalse(verification["exact_score_available"])
+        gate = maker_weekly.evaluate_heat_gate(item, datetime(2026, 8, 9, tzinfo=timezone.utc))
+        self.assertEqual(gate["status"], "pass")
+        self.assertEqual(gate["heat_method"], "reddit_weekly_rss_rank")
+
+    def test_reddit_weekly_rss_rank_eleven_fails_and_exact_low_score_cannot_be_rescued(self):
+        feed_url = "https://www.reddit.com/r/maker+robotics/top/.rss?t=week&limit=100"
+        base = {
+            "platform": "Reddit", "metrics_captured_at": "2026-08-12T10:00:00Z",
+            "metric_verification": {
+                "status": "ok", "provenance": "reddit_weekly_rss_rank",
+                "source_url": feed_url, "exact_score_available": False,
+            },
+        }
+        rank_eleven = {**base, "metrics": {"weekly_rss_rank": 11, "rss_feed_url": feed_url}}
+        exact_low = {
+            **base,
+            "metrics": {"score": 400, "comments": 99, "weekly_rss_rank": 1, "rss_feed_url": feed_url},
+        }
+        as_of = datetime(2026, 8, 9, tzinfo=timezone.utc)
+        self.assertEqual(maker_weekly.evaluate_heat_gate(rank_eleven, as_of)["status"], "fail")
+        self.assertEqual(maker_weekly.evaluate_heat_gate(exact_low, as_of)["status"], "fail")
+
+    def test_reddit_rank_proxy_rejects_non_combined_or_nonofficial_feed(self):
+        as_of = datetime(2026, 8, 9, tzinfo=timezone.utc)
+        for feed_url in (
+            "https://www.reddit.com/r/maker/top/.rss?t=week",
+            "https://example.com/r/maker+robotics/top/.rss?t=week",
+            "https://www.reddit.com/r/maker+robotics/new/.rss?t=week",
+        ):
+            item = {
+                "platform": "Reddit", "metrics_captured_at": "2026-08-12T10:00:00Z",
+                "metrics": {"weekly_rss_rank": 1, "rss_feed_url": feed_url},
+                "metric_verification": {
+                    "status": "ok", "provenance": "reddit_weekly_rss_rank",
+                    "source_url": feed_url, "exact_score_available": False,
+                },
+            }
+            with self.subTest(feed_url=feed_url):
+                self.assertEqual(maker_weekly.evaluate_heat_gate(item, as_of)["status"], "fail")
+
     def test_instagram_fallback_uses_graph_relay_evidence(self):
         source = {
             "id": "instagram-web", "type": "instagram_fallback", "platform": "Instagram",
@@ -1053,6 +1112,8 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertTrue(by_id["youtube-rss"]["enabled"])
         self.assertTrue(by_id["reddit-rss"]["enabled"])
         self.assertEqual(by_id["reddit-rss"]["detail_enrichment"], "reddit_fallback")
+        self.assertTrue(by_id["reddit-rss"]["weekly_rss_rank_fallback"]["enabled"])
+        self.assertEqual(config["heat_thresholds"]["reddit"]["weekly_rss_rank"], 10)
         self.assertEqual(by_id["instagram-web"]["type"], "instagram_fallback")
         self.assertNotIn("required_patterns", by_id["youtube-rss"])
         self.assertNotIn("required_patterns", by_id["reddit-rss"])

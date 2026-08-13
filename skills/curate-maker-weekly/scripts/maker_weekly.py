@@ -34,13 +34,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-USER_AGENT = "maker-weekly-radar/0.14"
+USER_AGENT = "maker-weekly-radar/0.15"
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "assets" / "config.example.json"
 HEAT_THRESHOLDS = {
     "kickstarter": {"usd_pledged": 5_000, "backers": 50},
     "indiegogo": {"usd_pledged": 20_000, "backers": 200},
     "youtube": {"views": 25_000, "channel_subscribers": 10_000},
-    "reddit": {"score_plus_comments": 500},
+    "reddit": {"score_plus_comments": 500, "weekly_rss_rank": 10},
     "github": {"stars": 1_000},
     "social": {"interactions": 5_000},
 }
@@ -541,7 +541,7 @@ def verified_platform_heat_passes(item: dict[str, Any], thresholds: Any = None) 
         threshold = resolved["youtube"]
         return int(metrics.get("views") or 0) >= threshold["views"] or int(metrics.get("channel_subscribers") or 0) >= threshold["channel_subscribers"]
     if "reddit" in platform:
-        return int(metrics.get("score") or 0) + int(metrics.get("comments") or 0) >= resolved["reddit"]["score_plus_comments"]
+        return reddit_heat_observation(item, resolved)[0]
     raise ConfigError("verified_heat_only currently supports YouTube and Reddit sources")
 
 
@@ -1881,9 +1881,10 @@ def enrich_reddit_public(item: dict[str, Any], timeout: int) -> None:
 
 
 def enrich_reddit_fallback(source: dict[str, Any], results: list[dict[str, Any]], context: dict[str, Any]) -> None:
-    """Resolve Reddit heat through OAuth, then audited browser evidence.
+    """Resolve Reddit heat through OAuth, browser evidence, then opted-in RSS rank.
 
-    RSS and anonymous pages remain discovery sources only in this strict mode.
+    The RSS proxy is accepted only for Reddit's official combined ``top/week``
+    feed and remains explicitly distinguishable from exact interaction counts.
     The legacy ``reddit_old`` enrichment remains available to custom profiles.
     """
     unresolved = list(results)
@@ -1912,6 +1913,31 @@ def enrich_reddit_fallback(source: dict[str, Any], results: list[dict[str, Any]]
         unresolved = still_unresolved
     except (OSError, json.JSONDecodeError, ConfigError) as exc:
         browser_error = exc
+
+    rank_fallback = source.get("weekly_rss_rank_fallback")
+    if rank_fallback:
+        if not isinstance(rank_fallback, dict) or rank_fallback.get("enabled") is not True:
+            raise ConfigError("weekly_rss_rank_fallback must be an enabled object")
+        configured_urls = source.get("feed_urls") or [source.get("feed_url")]
+        if len(configured_urls) != 1 or not reddit_weekly_rss_url(configured_urls[0]):
+            raise ConfigError("Reddit weekly RSS heat requires one official combined top/week feed")
+        feed_url = str(configured_urls[0])
+        still_unresolved = []
+        for item in unresolved:
+            metrics = item.get("metrics") if isinstance(item.get("metrics"), dict) else {}
+            rank = metric_number(metrics, "weekly_rss_rank")
+            if rank is None or str(metrics.get("rss_feed_url") or "") != feed_url:
+                still_unresolved.append(item)
+                continue
+            captured = item.get("metrics_captured_at") or iso_z(now_utc())
+            item["metrics_captured_at"] = captured
+            item["metric_verification"] = {
+                "status": "ok", "source_url": feed_url, "captured_at": captured,
+                "provenance": "reddit_weekly_rss_rank",
+                "ranking_basis": "official combined top/week RSS rank",
+                "exact_score_available": False,
+            }
+        unresolved = still_unresolved
 
     failures = [error for error in (oauth_error, browser_error) if error is not None]
     detail = "; ".join(clean_text(str(error), 180) for error in failures)
@@ -2069,7 +2095,13 @@ def collect_rss(source: dict[str, Any], context: dict[str, Any]) -> list[dict[st
             feed_order_score = max(0, 25 - feed_position)
             item = candidate(
                 source, title, link, summary=summary, author=author, published_at=parsed,
-                metrics={"keyword_hits": keyword_hits, "feed_host": urllib.parse.urlsplit(feed_url).hostname, **static_metrics}, evidence=[link, feed_url],
+                metrics={
+                    "keyword_hits": keyword_hits,
+                    "feed_host": urllib.parse.urlsplit(feed_url).hostname,
+                    "rss_feed_url": feed_url,
+                    **({"weekly_rss_rank": feed_position + 1} if reddit_weekly_rss_url(feed_url) else {}),
+                    **static_metrics,
+                }, evidence=[link, feed_url],
                 raw_score=keyword_hits * 10 + max(0, context["lookback_days"] - age_days) + feed_order_score,
             )
             if item:
@@ -2110,6 +2142,14 @@ def collect_rss(source: dict[str, Any], context: dict[str, Any]) -> list[dict[st
         detail_coverage = {
             "attempted_items": len(verification),
             "successful_items": sum(value == "ok" for value in verification),
+            "exact_verified_items": sum(
+                value == "ok" and item.get("metric_verification", {}).get("provenance") != "reddit_weekly_rss_rank"
+                for item, value in zip(results, verification)
+            ),
+            "proxy_verified_items": sum(
+                value == "ok" and item.get("metric_verification", {}).get("provenance") == "reddit_weekly_rss_rank"
+                for item, value in zip(results, verification)
+            ),
             "blocked_items": sum(value == "blocked" for value in verification),
             "error_items": sum(value == "error" for value in verification),
             "unknown_items": sum(value not in {"ok", "blocked", "error"} for value in verification),
@@ -2280,6 +2320,10 @@ def source_collection_outcome(
         unknown = int(detail.get("unknown_items") or 0)
         if attempted:
             details.append(f"metric details {verified}/{attempted} verified")
+            proxy = int(detail.get("proxy_verified_items") or 0)
+            exact = int(detail.get("exact_verified_items") or 0)
+            if proxy:
+                details.append(f"heat evidence exact={exact}, official RSS-rank proxy={proxy}")
         if attempted and verified < attempted:
             status = "blocked" if verified == 0 and blocked == attempted else "error"
             if errors or blocked or unknown:
@@ -2424,6 +2468,55 @@ def metric_number(metrics: dict[str, Any], *names: str) -> float | None:
     return None
 
 
+def reddit_weekly_rss_url(value: Any) -> bool:
+    """Accept only Reddit's official combined weekly-top RSS endpoint."""
+    try:
+        parsed = urllib.parse.urlsplit(str(value or ""))
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").lower()
+    query = urllib.parse.parse_qs(parsed.query)
+    return (
+        host in {"reddit.com", "www.reddit.com"}
+        and parsed.path.startswith("/r/")
+        and "+" in parsed.path.split("/top/", 1)[0]
+        and parsed.path.endswith("/top/.rss")
+        and query.get("t") == ["week"]
+    )
+
+
+def reddit_heat_observation(
+    item: dict[str, Any], thresholds: Any = None,
+) -> tuple[bool, str, str]:
+    """Prefer exact interactions; use an auditable official RSS rank only if absent."""
+    resolved = resolve_heat_thresholds(thresholds)
+    metrics = item.get("metrics") if isinstance(item.get("metrics"), dict) else {}
+    score, comments = metric_number(metrics, "score", "upvotes"), metric_number(metrics, "comments")
+    exact_threshold = resolved["reddit"]["score_plus_comments"]
+    if score is not None and comments is not None:
+        return (
+            score + comments >= exact_threshold,
+            f"score + comments >= {exact_threshold:g}",
+            f"score={score}; comments={comments}; basis=exact",
+        )
+    verification = item.get("metric_verification") if isinstance(item.get("metric_verification"), dict) else {}
+    rank = metric_number(metrics, "weekly_rss_rank")
+    source_url = str(verification.get("source_url") or metrics.get("rss_feed_url") or "")
+    rank_threshold = resolved["reddit"]["weekly_rss_rank"]
+    proxy_valid = (
+        verification.get("status") == "ok"
+        and verification.get("provenance") == "reddit_weekly_rss_rank"
+        and verification.get("exact_score_available") is False
+        and reddit_weekly_rss_url(source_url)
+        and rank is not None
+    )
+    return (
+        bool(proxy_valid and 1 <= rank <= rank_threshold),
+        f"精确互动合计 >= {exact_threshold:g}；不可见时采用官方合并 top/week RSS 前 {rank_threshold:g}",
+        f"weekly_rss_rank={rank}; exact_score_available=false; basis=official_rss_proxy",
+    )
+
+
 def admissible_kickstarter_usd(metrics: dict[str, Any]) -> tuple[float | None, str]:
     """Return only a USD amount whose conversion evidence is safe for the heat gate."""
     currency = str(metrics.get("currency") or "").upper().strip()
@@ -2496,9 +2589,10 @@ def evaluate_heat_gate(item: dict[str, Any], as_of: datetime, thresholds: Any = 
         threshold = resolved["youtube"]
         gate.update(threshold="25,000 播放或频道 10,000 订阅", observed=f"views={views}; subscribers={subscribers}", status="pass" if (views or 0) >= threshold["views"] or (subscribers or 0) >= threshold["channel_subscribers"] else "fail")
     elif "reddit" in platform:
-        score, comments = metric_number(metrics, "score", "upvotes"), metric_number(metrics, "comments")
-        threshold = resolved["reddit"]["score_plus_comments"]
-        gate.update(threshold="score + comments >= 500", observed=f"score={score}; comments={comments}", status="pass" if score is not None and comments is not None and score + comments >= threshold else "fail")
+        passed, threshold_text, observed = reddit_heat_observation(item, resolved)
+        gate.update(threshold=threshold_text, observed=observed, status="pass" if passed else "fail")
+        if "official_rss_proxy" in observed:
+            gate.update(heat_method="reddit_weekly_rss_rank", exact_score_available=False)
     elif platform in {"x", "x / twitter", "twitter", "instagram"}:
         values = [metric_number(metrics, name) for name in ("likes", "comments", "reposts", "replies", "quotes")]
         interactions = metric_number(metrics, "interactions")

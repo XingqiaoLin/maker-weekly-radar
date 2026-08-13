@@ -36,6 +36,20 @@ class StrictWeeklyTests(unittest.TestCase):
         self.assertEqual(kickstarter["status"], "pass")
         self.assertEqual(youtube_rss["status"], "unknown")
 
+    def test_strict_reddit_gate_accepts_labeled_official_weekly_top_ten_proxy(self):
+        feed_url = "https://www.reddit.com/r/maker+robotics/top/.rss?t=week&limit=100"
+        item = {
+            "platform": "Reddit", "url": "https://www.reddit.com/r/maker/comments/post123/machine/",
+            "metrics": {"weekly_rss_rank": 10, "rss_feed_url": feed_url},
+            "metric_verification": {
+                "status": "ok", "provenance": "reddit_weekly_rss_rank",
+                "source_url": feed_url, "exact_score_available": False,
+            },
+        }
+        gate = strict_weekly.heat_gate(item)
+        self.assertEqual(gate["status"], "pass")
+        self.assertEqual(gate["heat_method"], "reddit_weekly_rss_rank")
+
     def test_strict_heat_gate_rejects_unverified_non_usd_kickstarter_amount(self):
         step_safe = {
             "platform": "Kickstarter", "url": "https://kickstarter.com/stepsafe",
