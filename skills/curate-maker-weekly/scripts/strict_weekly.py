@@ -79,10 +79,15 @@ def heat_gate(item: dict[str, Any]) -> dict[str, Any]:
     metrics = item.get("metrics") if isinstance(item.get("metrics"), dict) else {}
     result: dict[str, Any] = {"status": "unknown", "observed": "无法从候选数据核验", "threshold": "平台未映射", "evidence_url": item.get("url")}
     if "kickstarter" in platform:
-        pledged, backers = number(metrics, "usd_pledged", "pledged_usd"), number(metrics, "backers")
+        pledged, amount_basis = maker_weekly.admissible_kickstarter_usd(metrics)
+        reported_usd, backers = number(metrics, "reported_usd_pledged", "usd_pledged", "pledged_usd"), number(metrics, "backers")
         threshold = maker_weekly.HEAT_THRESHOLDS["kickstarter"]
-        result.update(threshold="US$5,000 或 50 名支持者", observed=f"USD={pledged}; backers={backers}")
-        if pledged is not None or backers is not None:
+        result.update(
+            threshold="可审计 US$5,000 或 50 名支持者",
+            observed=f"eligible_usd={pledged}; reported_usd={reported_usd}; currency={metrics.get('currency')}; backers={backers}",
+            amount_basis=amount_basis,
+        )
+        if pledged is not None or reported_usd is not None or backers is not None:
             result["status"] = "pass" if (pledged or 0) >= threshold["usd_pledged"] or (backers or 0) >= threshold["backers"] else "fail"
     elif "indiegogo" in platform:
         pledged, backers = number(metrics, "usd_pledged", "pledged_usd"), number(metrics, "backers")

@@ -36,6 +36,24 @@ class StrictWeeklyTests(unittest.TestCase):
         self.assertEqual(kickstarter["status"], "pass")
         self.assertEqual(youtube_rss["status"], "unknown")
 
+    def test_strict_heat_gate_rejects_unverified_non_usd_kickstarter_amount(self):
+        step_safe = {
+            "platform": "Kickstarter", "url": "https://kickstarter.com/stepsafe",
+            "metrics": {
+                "currency": "CAD", "reported_usd_pledged": 8411, "backers": 47,
+                "currency_conversion": {"status": "unverified", "admissible_for_heat_gate": False},
+            },
+        }
+        xtra_maker = {
+            "platform": "Kickstarter", "url": "https://kickstarter.com/xtramaker",
+            "metrics": {
+                "currency": "HKD", "reported_usd_pledged": 460475, "backers": 107,
+                "currency_conversion": {"status": "unverified", "admissible_for_heat_gate": False},
+            },
+        }
+        self.assertEqual(strict_weekly.heat_gate(step_safe)["status"], "fail")
+        self.assertEqual(strict_weekly.heat_gate(xtra_maker)["status"], "pass")
+
     def test_time_gate_allows_only_current_week_first_release(self):
         payload = {
             "source_status": [{"status": "ok", "platform": "GitHub"}],

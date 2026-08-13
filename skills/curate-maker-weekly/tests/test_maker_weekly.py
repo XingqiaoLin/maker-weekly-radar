@@ -195,6 +195,9 @@ class MakerWeeklyTests(unittest.TestCase):
         cases = [
             ({"platform": "Kickstarter", "metrics": {"backers": 49}, "metrics_captured_at": captured}, "fail"),
             ({"platform": "Kickstarter", "metrics": {"backers": 50}, "metrics_captured_at": captured}, "pass"),
+            ({"platform": "Kickstarter", "metrics": {"currency": "CAD", "reported_usd_pledged": 8411, "backers": 47, "currency_conversion": {"status": "unverified", "admissible_for_heat_gate": False}}, "metrics_captured_at": captured}, "fail"),
+            ({"platform": "Kickstarter", "metrics": {"currency": "HKD", "reported_usd_pledged": 460475, "backers": 107, "currency_conversion": {"status": "unverified", "admissible_for_heat_gate": False}}, "metrics_captured_at": captured}, "pass"),
+            ({"platform": "Kickstarter", "metrics": {"currency": "USD", "usd_pledged": 5000, "backers": 1}, "metrics_captured_at": captured}, "pass"),
             ({"platform": "YouTube", "metrics": {"views": 24999}, "metrics_captured_at": captured}, "fail"),
             ({"platform": "YouTube", "metrics": {"views": 25000}, "metrics_captured_at": captured}, "pass"),
             ({"platform": "Reddit", "metrics": {"score": 400, "comments": 99}, "metrics_captured_at": captured}, "fail"),
@@ -660,7 +663,7 @@ class MakerWeeklyTests(unittest.TestCase):
         listing = b'''<html><a href="/projects/maker/robot-arm/">Robot Arm</a></html>'''
         payload = {
             "name": "Open Hardware Robot Arm", "blurb": "A DIY robot arm built and tested from scratch.",
-            "goal": 10000, "state": "live", "currency": "USD", "backers_count": 250,
+            "goal": 10000, "pledged": 30000, "state": "live", "currency": "USD", "backers_count": 250,
             "usd_pledged": "30000", "staff_pick": True, "launched_at": 1785859200,
             "deadline": 1788451200, "creator": {"name": "Small Maker Team"},
             "category": {"parent_name": "Technology", "name": "Robots"},
@@ -684,6 +687,66 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertEqual(items[0]["metrics"]["usd_pledged"], 30000)
         self.assertEqual(items[0]["metric_verification"]["status"], "ok")
         self.assertIn("/widget/card.html?v=2", request.call_args_list[1].args[0])
+
+    def test_kickstarter_non_usd_widget_amount_is_audit_only(self):
+        listing = b'''<html><a href="/projects/maker/stepsafe-kids/">StepSafe Kids</a></html>'''
+        payload = {
+            "name": "StepSafe Kids", "blurb": "A physical prototype built and tested by a small team.",
+            "goal": 10000, "pledged": 11500, "state": "live", "currency": "CAD", "backers_count": 47,
+            "usd_pledged": "8411", "static_usd_rate": 0.7314, "fx_rate": 0.73,
+            "usd_exchange_rate": 0.73, "current_currency": "USD", "usd_type": "international",
+            "staff_pick": False, "launched_at": 1785859200,
+            "deadline": 1788451200, "creator": {"name": "Small Maker Team"},
+            "category": {"parent_name": "Technology", "name": "Hardware"},
+            "urls": {"web": {"project": "https://www.kickstarter.com/projects/maker/stepsafe-kids"}},
+        }
+        widget = f'<html><script>window.current_project = "{maker_weekly.html.escape(json.dumps(payload))}";</script></html>'.encode()
+        source = {
+            "id": "kickstarter", "type": "kickstarter_kicktraq", "platform": "Kickstarter",
+            "listing_url": "https://www.kicktraq.com/categories/technology/hardware/?sort=new",
+            "keywords": ["hardware", "prototype"], "detail_workers": 1,
+        }
+        context = {
+            "timeout": 10, "limit": 5, "since": datetime(2026, 8, 3, tzinfo=timezone.utc),
+            "as_of": datetime(2026, 8, 9, 23, 59, 59, tzinfo=timezone.utc),
+            "heat_thresholds": maker_weekly.resolve_heat_thresholds(),
+        }
+        with mock.patch.object(maker_weekly, "request_bytes", side_effect=[listing, widget]):
+            item = maker_weekly.collect_kickstarter_kicktraq(source, context)[0]
+        self.assertNotIn("usd_pledged", item["metrics"])
+        self.assertEqual(item["metrics"]["pledged"], 11500)
+        self.assertEqual(item["metrics"]["reported_usd_pledged"], 8411)
+        self.assertEqual(item["metrics"]["currency_conversion"]["status"], "unverified")
+        self.assertFalse(item["metrics"]["currency_conversion"]["admissible_for_heat_gate"])
+        self.assertEqual(item["metrics"]["currency_conversion"]["widget_static_usd_rate"], 0.7314)
+        gate = maker_weekly.evaluate_heat_gate(item, context["as_of"])
+        self.assertEqual(gate["status"], "fail")
+        self.assertEqual(gate["amount_basis"], "non_usd_conversion_unverified")
+
+    def test_kickstarter_verified_non_usd_conversion_requires_complete_audit_fields(self):
+        captured = "2026-08-12T00:00:00Z"
+        base = {
+            "platform": "Kickstarter", "metrics_captured_at": captured,
+            "metrics": {"currency": "CAD", "usd_pledged": 6000, "backers": 10},
+        }
+        incomplete = json.loads(json.dumps(base))
+        incomplete["metrics"]["currency_conversion"] = {"status": "verified", "admissible_for_heat_gate": True}
+        self.assertEqual(maker_weekly.evaluate_heat_gate(incomplete, datetime(2026, 8, 9, tzinfo=timezone.utc))["status"], "fail")
+        complete = json.loads(json.dumps(base))
+        complete["metrics"]["currency_conversion"] = {
+            "status": "verified", "admissible_for_heat_gate": True,
+            "source_currency": "CAD", "target_currency": "USD",
+            "source_amount": 8000, "rate": 0.75, "converted_amount_usd": 6000,
+            "source_url": "https://official.example.test/rates/cad-usd",
+            "captured_at": captured,
+        }
+        gate = maker_weekly.evaluate_heat_gate(complete, datetime(2026, 8, 9, tzinfo=timezone.utc))
+        self.assertEqual(gate["status"], "pass")
+        self.assertEqual(gate["amount_basis"], "verified_conversion")
+
+        inconsistent = json.loads(json.dumps(complete))
+        inconsistent["metrics"]["currency_conversion"]["rate"] = 0.5
+        self.assertEqual(maker_weekly.evaluate_heat_gate(inconsistent, datetime(2026, 8, 9, tzinfo=timezone.utc))["status"], "fail")
 
     def test_indiegogo_public_api_filters_window_and_preserves_currency(self):
         projects = [

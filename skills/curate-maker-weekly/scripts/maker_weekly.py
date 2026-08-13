@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-USER_AGENT = "maker-weekly-radar/0.12"
+USER_AGENT = "maker-weekly-radar/0.13"
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "assets" / "config.example.json"
 HEAT_THRESHOLDS = {
     "kickstarter": {"usd_pledged": 5_000, "backers": 50},
@@ -1460,27 +1460,51 @@ def collect_kickstarter_kicktraq(source: dict[str, Any], context: dict[str, Any]
         if launched and not (context["since"] <= launched <= context["as_of"]):
             continue
         backers = int(project.get("backers_count") or 0)
-        usd_pledged = float(project.get("usd_pledged") or 0)
+        currency = str(project.get("currency") or "").upper().strip()
+        native_pledged = float(project.get("pledged") or 0)
+        reported_usd_pledged = float(project.get("usd_pledged") or 0)
         web_urls = project.get("urls") if isinstance(project.get("urls"), dict) else {}
         web_urls = web_urls.get("web") if isinstance(web_urls.get("web"), dict) else {}
         project_url = str(web_urls.get("project") or discovered_item["url"])
-        metrics = {
-            "backers": backers, "usd_pledged": usd_pledged, "goal": float(project.get("goal") or 0),
-            "currency": str(project.get("currency") or ""), "state": str(project.get("state") or ""),
+        metrics: dict[str, Any] = {
+            "backers": backers, "pledged": native_pledged, "goal": float(project.get("goal") or 0),
+            "currency": currency, "state": str(project.get("state") or ""),
             "staff_pick": bool(project.get("staff_pick")), "deadline": iso_z(parse_datetime(project.get("deadline"))),
         }
+        if currency == "USD":
+            metrics["usd_pledged"] = reported_usd_pledged
+            metrics["currency_conversion"] = {
+                "status": "not_required", "admissible_for_heat_gate": True,
+                "basis": "project_currency_usd", "source_url": project["_widget_url"], "captured_at": captured_at,
+            }
+        else:
+            # Kickstarter's widget exposes a USD-equivalent number but does not
+            # expose the exchange-rate source or conversion observation time.
+            # Preserve it for audit and never let it silently satisfy a USD gate.
+            metrics["reported_usd_pledged"] = reported_usd_pledged
+            metrics["currency_conversion"] = {
+                "status": "unverified", "admissible_for_heat_gate": False,
+                "basis": "kickstarter_widget_reported_usd_equivalent",
+                "source_url": project["_widget_url"], "captured_at": captured_at,
+                "widget_static_usd_rate": project.get("static_usd_rate"),
+                "widget_fx_rate": project.get("fx_rate"),
+                "widget_usd_exchange_rate": project.get("usd_exchange_rate"),
+                "widget_current_currency": project.get("current_currency"),
+                "widget_usd_type": project.get("usd_type"),
+                "reason": "official widget omitted an auditable exchange-rate source and conversion timestamp",
+            }
         creator = project.get("creator") if isinstance(project.get("creator"), dict) else {}
         tags = [str(category.get(key) or "") for key in ("parent_name", "name")]
         item = candidate(
             source, title, project_url, summary=summary, author=creator.get("name"), published_at=launched,
             metrics=metrics, metrics_captured_at=captured_at, tags=tags,
             evidence=[project_url, project["_widget_url"], discovered_item["kicktraq_url"], discovered_item["listing_url"]],
-            raw_score=usd_pledged / kickstarter_threshold["usd_pledged"] + backers / kickstarter_threshold["backers"],
+            raw_score=(reported_usd_pledged / kickstarter_threshold["usd_pledged"] if currency == "USD" else 0) + backers / kickstarter_threshold["backers"],
         )
         if item:
             item["metric_verification"] = {
                 "status": "ok", "source_url": project["_widget_url"], "captured_at": captured_at,
-                "ranking_basis": "usd_pledged/5000 + backers/50",
+                "ranking_basis": "eligible_usd_pledged/5000 + backers/50; non-USD widget equivalents are audit-only",
             }
             results.append(item)
     if parsed_details == 0:
@@ -2348,6 +2372,40 @@ def metric_number(metrics: dict[str, Any], *names: str) -> float | None:
     return None
 
 
+def admissible_kickstarter_usd(metrics: dict[str, Any]) -> tuple[float | None, str]:
+    """Return only a USD amount whose conversion evidence is safe for the heat gate."""
+    currency = str(metrics.get("currency") or "").upper().strip()
+    pledged = metric_number(metrics, "usd_pledged", "pledged_usd")
+    if currency == "USD" and pledged is not None:
+        return pledged, "project_currency_usd"
+    conversion = metrics.get("currency_conversion") if isinstance(metrics.get("currency_conversion"), dict) else {}
+    source_amount = metric_number(conversion, "source_amount")
+    rate = metric_number(conversion, "rate")
+    converted_usd = metric_number(conversion, "converted_amount_usd")
+    source_currency = str(conversion.get("source_currency") or "").upper().strip()
+    target_currency = str(conversion.get("target_currency") or "").upper().strip()
+    arithmetic_matches = bool(
+        source_amount is not None and source_amount >= 0
+        and rate is not None and rate > 0
+        and converted_usd is not None and converted_usd >= 0
+        and pledged is not None
+        and abs(source_amount * rate - converted_usd) <= max(0.01, converted_usd * 0.001)
+        and abs(pledged - converted_usd) <= max(0.01, converted_usd * 0.001)
+    )
+    if (
+        pledged is not None
+        and conversion.get("status") == "verified"
+        and conversion.get("admissible_for_heat_gate") is True
+        and source_currency == currency
+        and target_currency == "USD"
+        and arithmetic_matches
+        and str(conversion.get("source_url") or "").startswith(("http://", "https://"))
+        and parse_datetime(conversion.get("captured_at")) is not None
+    ):
+        return pledged, "verified_conversion"
+    return None, "non_usd_conversion_unverified" if currency and currency != "USD" else "usd_currency_unverified"
+
+
 def evaluate_heat_gate(item: dict[str, Any], as_of: datetime, thresholds: Any = None) -> dict[str, Any]:
     """Evaluate heat observed during execution; ``as_of`` only bounds publication."""
     platform = str(item.get("platform") or "").lower().strip()
@@ -2364,9 +2422,14 @@ def evaluate_heat_gate(item: dict[str, Any], as_of: datetime, thresholds: Any = 
     if captured is not None:
         gate["observation_policy"] = "execution_time"
     if "kickstarter" in platform:
-        pledged, backers = metric_number(metrics, "usd_pledged", "pledged_usd"), metric_number(metrics, "backers")
+        pledged, amount_basis = admissible_kickstarter_usd(metrics)
+        reported_usd, backers = metric_number(metrics, "reported_usd_pledged", "usd_pledged", "pledged_usd"), metric_number(metrics, "backers")
         threshold = resolved["kickstarter"]
-        gate.update(threshold="US$5,000 或 50 名支持者", observed=f"USD={pledged}; backers={backers}")
+        gate.update(
+            threshold="可审计 US$5,000 或 50 名支持者",
+            observed=f"eligible_usd={pledged}; reported_usd={reported_usd}; currency={metrics.get('currency')}; backers={backers}",
+            amount_basis=amount_basis,
+        )
         gate["status"] = "pass" if (pledged or 0) >= threshold["usd_pledged"] or (backers or 0) >= threshold["backers"] else "fail"
     elif "indiegogo" in platform:
         pledged, backers = metric_number(metrics, "usd_pledged", "pledged_usd"), metric_number(metrics, "backers")
