@@ -11,6 +11,7 @@ import argparse
 import base64
 import hashlib
 import html
+import http.client
 import json
 import os
 import re
@@ -33,7 +34,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-USER_AGENT = "maker-weekly-radar/0.11"
+USER_AGENT = "maker-weekly-radar/0.12"
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "assets" / "config.example.json"
 HEAT_THRESHOLDS = {
     "kickstarter": {"usd_pledged": 5_000, "backers": 50},
@@ -75,6 +76,14 @@ class ResourceNotFound(RuntimeError):
     """A public resource is absent; callers may try a bounded alternate path."""
 
     pass
+
+
+class ProviderServerError(RuntimeError):
+    """A provider returned a retryable 5xx response after bounded retries."""
+
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+        super().__init__(f"HTTP {status_code} from provider after bounded retries")
 
 
 def now_utc() -> datetime:
@@ -190,7 +199,7 @@ def request_bytes(
 ) -> bytes:
     request_headers = {"Accept": "application/json, application/rss+xml, application/xml;q=0.9, */*;q=0.5", "User-Agent": USER_AGENT}
     request_headers.update(headers or {})
-    last_connection_error: urllib.error.URLError | None = None
+    last_connection_error: urllib.error.URLError | http.client.IncompleteRead | TimeoutError | None = None
     for attempt in range(3):
         request = urllib.request.Request(url, headers=request_headers, data=data)
         try:
@@ -205,6 +214,11 @@ def request_bytes(
                     delay = float(2 ** attempt)
                 time.sleep(delay)
                 continue
+            if exc.code in {500, 502, 503, 504}:
+                if attempt < 2:
+                    time.sleep(float(2 ** attempt))
+                    continue
+                raise ProviderServerError(exc.code) from exc
             if exc.code in {401, 403, 429}:
                 raise AccessBlocked(f"HTTP {exc.code} from provider; public collection was blocked or rate-limited") from exc
             if exc.code == 404:
@@ -212,8 +226,35 @@ def request_bytes(
             raise RuntimeError(f"HTTP {exc.code} from provider") from exc
         except urllib.error.URLError as exc:
             last_connection_error = exc
+        except http.client.IncompleteRead as exc:
+            last_connection_error = exc
+        except TimeoutError as exc:
+            last_connection_error = exc
     assert last_connection_error is not None
-    raise RuntimeError(f"provider connection failed after 3 attempts: {last_connection_error.reason}") from last_connection_error
+    reason = last_connection_error.reason if isinstance(last_connection_error, urllib.error.URLError) else str(last_connection_error)
+    raise RuntimeError(f"provider connection failed after 3 attempts: {reason}") from last_connection_error
+
+
+def provider_failure_record(url: str, exc: Exception) -> dict[str, Any]:
+    """Return a bounded, machine-readable failure without hiding the feed URL."""
+    if isinstance(exc, ResourceNotFound):
+        category, http_status = "not_found", 404
+    elif isinstance(exc, AccessBlocked):
+        match = re.search(r"HTTP\s+([0-9]{3})", str(exc))
+        category, http_status = "blocked", int(match.group(1)) if match else None
+    elif isinstance(exc, ProviderServerError):
+        category, http_status = "server_error", exc.status_code
+    elif isinstance(exc, ET.ParseError):
+        category, http_status = "parse_error", None
+    else:
+        match = re.search(r"HTTP\s+([0-9]{3})", str(exc))
+        category, http_status = "error", int(match.group(1)) if match else None
+    return {
+        "url": url,
+        "category": category,
+        "http_status": http_status,
+        "error": clean_text(str(exc), 300),
+    }
 
 
 def request_json(
@@ -1895,14 +1936,35 @@ def collect_rss(source: dict[str, Any], context: dict[str, Any]) -> list[dict[st
     if not isinstance(static_metrics, dict):
         raise ConfigError("rss static_metrics must be an object")
     results = []
-    failures = []
+    coverage: dict[str, Any] = {
+        "kind": "rss_feeds",
+        "total_feeds": len(urls),
+        "successful_feeds": 0,
+        "failed_feeds": 0,
+        "success_ratio": 0.0,
+        "failures": [],
+    }
+    context.setdefault("_source_diagnostics", {})[str(source["id"])] = {"feed_coverage": coverage}
+
+    def load_feed(feed_url: str) -> ET.Element:
+        try:
+            return ET.fromstring(request_bytes(feed_url, context["timeout"]))
+        except ResourceNotFound:
+            # YouTube occasionally answers valid channel feeds with a transient
+            # 404 during a bundle run. Recheck once after a short bounded pause;
+            # a repeated 404 is still recorded as missing and never called ok.
+            if "youtube.com/feeds/videos.xml" not in feed_url:
+                raise
+            time.sleep(min(1.0, float(source.get("youtube_404_recheck_delay_seconds") or 0.5)))
+            return ET.fromstring(request_bytes(feed_url, context["timeout"]))
+
     for feed_url in urls:
         try:
-            raw = request_bytes(feed_url, context["timeout"])
-            root = ET.fromstring(raw)
+            root = load_feed(feed_url)
         except (RuntimeError, ET.ParseError) as exc:
-            failures.append(f"{urllib.parse.urlsplit(feed_url).hostname}: {exc}")
+            coverage["failures"].append(provider_failure_record(feed_url, exc))
             continue
+        coverage["successful_feeds"] += 1
         entries = [entry for entry in root.iter() if local_name(entry.tag) in {"item", "entry"}]
         for feed_position, entry in enumerate(entries):
             title = child_value(entry, {"title"})
@@ -1947,8 +2009,16 @@ def collect_rss(source: dict[str, Any], context: dict[str, Any]) -> list[dict[st
         pause = float(source.get("feed_pause_seconds") or 0)
         if pause > 0 and feed_url != urls[-1]:
             time.sleep(min(10.0, pause))
-    if failures and not results:
-        raise RuntimeError("all RSS feeds failed: " + "; ".join(failures))
+    coverage["failed_feeds"] = len(coverage["failures"])
+    coverage["success_ratio"] = round(coverage["successful_feeds"] / coverage["total_feeds"], 4)
+    if coverage["successful_feeds"] == 0:
+        summary = "; ".join(
+            f"{failure['url']} ({failure['category']}{' HTTP ' + str(failure['http_status']) if failure.get('http_status') else ''})"
+            for failure in coverage["failures"]
+        )
+        if coverage["failures"] and all(failure["category"] == "blocked" for failure in coverage["failures"]):
+            raise AccessBlocked("all RSS feeds were blocked: " + summary)
+        raise RuntimeError("all RSS feeds failed: " + summary)
     if source.get("detail_enrichment"):
         detail_limit = int(source.get("detail_candidate_limit") or max(20, int(context.get("limit") or 5) * 4))
         if detail_limit < 1:
@@ -1959,6 +2029,16 @@ def collect_rss(source: dict[str, Any], context: dict[str, Any]) -> list[dict[st
             reverse=True,
         )[:detail_limit]
     enrich_rss_details(source, results, context)
+    if source.get("detail_enrichment"):
+        verification = [str(item.get("metric_verification", {}).get("status") or "unknown") for item in results]
+        detail_coverage = {
+            "attempted_items": len(verification),
+            "successful_items": sum(value == "ok" for value in verification),
+            "blocked_items": sum(value == "blocked" for value in verification),
+            "error_items": sum(value == "error" for value in verification),
+            "unknown_items": sum(value not in {"ok", "blocked", "error"} for value in verification),
+        }
+        context["_source_diagnostics"][str(source["id"])]["detail_coverage"] = detail_coverage
     for item in results:
         item.pop("_heat_thresholds", None)
     # Raw discovery deliberately keeps metric failures and sub-threshold posts.
@@ -2099,6 +2179,62 @@ def heuristic_components(item: dict[str, Any], as_of: datetime, keywords: list[s
     }
 
 
+def source_collection_outcome(
+    raw_items: list[dict[str, Any]], diagnostics: dict[str, Any] | None,
+) -> tuple[str, str]:
+    """Resolve source status conservatively from discovery and verification coverage."""
+    status = "ok" if raw_items else "empty"
+    details: list[str] = []
+    diagnostics = diagnostics or {}
+    feed = diagnostics.get("feed_coverage") if isinstance(diagnostics.get("feed_coverage"), dict) else None
+    if feed:
+        succeeded = int(feed.get("successful_feeds") or 0)
+        total = int(feed.get("total_feeds") or 0)
+        failed = int(feed.get("failed_feeds") or 0)
+        details.append(f"RSS feeds {succeeded}/{total} succeeded")
+        if failed:
+            status = "error"
+
+    detail = diagnostics.get("detail_coverage") if isinstance(diagnostics.get("detail_coverage"), dict) else None
+    if detail:
+        attempted = int(detail.get("attempted_items") or 0)
+        verified = int(detail.get("successful_items") or 0)
+        blocked = int(detail.get("blocked_items") or 0)
+        errors = int(detail.get("error_items") or 0)
+        unknown = int(detail.get("unknown_items") or 0)
+        if attempted:
+            details.append(f"metric details {verified}/{attempted} verified")
+        if attempted and verified < attempted:
+            status = "blocked" if verified == 0 and blocked == attempted else "error"
+            if errors or blocked or unknown:
+                details.append(f"detail failures: blocked={blocked}, error={errors}, unknown={unknown}")
+    elif raw_items:
+        verification = [
+            str(item.get("metric_verification", {}).get("status") or "")
+            for item in raw_items
+            if item.get("metric_verification")
+        ]
+        failures = [value for value in verification if value in {"error", "blocked"}]
+        if failures:
+            status = "blocked" if len(failures) == len(verification) and all(value == "blocked" for value in failures) else "error"
+            details.append(f"metric details {len(verification) - len(failures)}/{len(verification)} verified")
+    return status, "; ".join(details)
+
+
+def status_record(
+    source: dict[str, Any], status: str, raw_count: int, detail: str = "", diagnostics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "source_id": source["id"], "platform": source.get("platform", source["id"]),
+        "status": status, "raw_count": raw_count, "count": raw_count,
+    }
+    if detail:
+        record["detail"] = detail
+    if diagnostics:
+        record["coverage"] = diagnostics
+    return record
+
+
 def collect_raw_envelope(config_path: Path, as_of: datetime, source_ids: set[str] | None = None) -> dict[str, Any]:
     config = load_config(config_path)
     lookback_days = int(config.get("lookback_days", 7))
@@ -2116,7 +2252,7 @@ def collect_raw_envelope(config_path: Path, as_of: datetime, source_ids: set[str
         if source_ids and str(source["id"]) not in source_ids:
             continue
         if not source.get("enabled", True):
-            statuses.append({"source_id": source["id"], "platform": source.get("platform", source["id"]), "status": "skipped", "raw_count": 0, "count": 0, "detail": "source disabled in configuration"})
+            statuses.append(status_record(source, "skipped", 0, "source disabled in configuration"))
             continue
         try:
             raw_items = COLLECTORS[source["type"]](source, context)
@@ -2132,22 +2268,18 @@ def collect_raw_envelope(config_path: Path, as_of: datetime, source_ids: set[str
                 reverse=True,
             )[:discovery_limit]
             collected.extend(raw_items)
-            verification = [str(item.get("metric_verification", {}).get("status") or "") for item in raw_items]
-            detail_failures = bool(verification) and all(value in {"error", "blocked"} for value in verification)
-            if detail_failures:
-                blocked = any(value == "blocked" for value in verification)
-                status = "blocked" if blocked else "error"
-                detail = "discovery succeeded but every approved metric evidence path was unavailable"
-            else:
-                status = "ok" if raw_items else "empty"
-                detail = ""
-            statuses.append({"source_id": source["id"], "platform": source.get("platform", source["id"]), "status": status, "raw_count": len(raw_items), "count": len(raw_items), **({"detail": detail} if detail else {})})
+            diagnostics = context.get("_source_diagnostics", {}).get(str(source["id"]))
+            status, detail = source_collection_outcome(raw_items, diagnostics)
+            statuses.append(status_record(source, status, len(raw_items), detail, diagnostics))
         except MissingCredential as exc:
-            statuses.append({"source_id": source["id"], "platform": source.get("platform", source["id"]), "status": "skipped", "raw_count": 0, "count": 0, "detail": str(exc)})
+            diagnostics = context.get("_source_diagnostics", {}).get(str(source["id"]))
+            statuses.append(status_record(source, "skipped", 0, str(exc), diagnostics))
         except AccessBlocked as exc:
-            statuses.append({"source_id": source["id"], "platform": source.get("platform", source["id"]), "status": "blocked", "raw_count": 0, "count": 0, "detail": str(exc)})
+            diagnostics = context.get("_source_diagnostics", {}).get(str(source["id"]))
+            statuses.append(status_record(source, "blocked", 0, str(exc), diagnostics))
         except Exception as exc:  # isolate provider failures so partial reports remain useful
-            statuses.append({"source_id": source["id"], "platform": source.get("platform", source["id"]), "status": "error", "raw_count": 0, "count": 0, "detail": str(exc)})
+            diagnostics = context.get("_source_diagnostics", {}).get(str(source["id"]))
+            statuses.append(status_record(source, "error", 0, str(exc), diagnostics))
     return {
         "schema_version": 2,
         "stage": "raw_discoveries",
@@ -2416,7 +2548,20 @@ def render_markdown(payload: dict[str, Any]) -> str:
         detail = str(status.get("detail", "")).replace("|", "\\|")
         lines.append(f"| {status.get('platform', status.get('source_id'))} | {status.get('status')} | {status.get('count', 0)} | {detail} |")
     searched = sum(status.get("status") in {"ok", "empty"} for status in payload.get("source_status", []))
-    lines.extend(["", f"实际完成检索平台：{searched}", "", "## 原始发现明细", ""])
+    lines.extend(["", f"实际完成检索平台：{searched}"])
+    feed_failures = []
+    for status in payload.get("source_status", []):
+        coverage = status.get("coverage") if isinstance(status.get("coverage"), dict) else {}
+        feed = coverage.get("feed_coverage") if isinstance(coverage.get("feed_coverage"), dict) else {}
+        for failure in feed.get("failures") or []:
+            if isinstance(failure, dict):
+                feed_failures.append((status.get("platform", status.get("source_id")), failure))
+    if feed_failures:
+        lines.extend(["", "## Feed 失败明细", ""])
+        for platform, failure in feed_failures:
+            code = f"HTTP {failure['http_status']}" if failure.get("http_status") else failure.get("category", "error")
+            lines.append(f"- {platform}：{failure.get('url')} — {code} — {failure.get('error', '')}")
+    lines.extend(["", "## 原始发现明细", ""])
     for index, item in enumerate(items, 1):
         rank = item.get("rank", index)
         lines.extend([

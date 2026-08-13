@@ -1,7 +1,9 @@
 import importlib.util
 import json
+import http.client
 import tempfile
 import unittest
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -255,6 +257,147 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertEqual(len(items), 2)
         self.assertEqual(len(ranked), 1)
         self.assertEqual(ranked[0]["platform"], "YouTube")
+
+    def test_partial_rss_bundle_is_error_and_preserves_successful_discoveries(self):
+        feed = b"""<feed xmlns='http://www.w3.org/2005/Atom'><entry><title>Working robot</title><link href='https://youtube.test/watch?v=working1'/><published>2026-08-07T00:00:00Z</published></entry></feed>"""
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            config = {"lookback_days": 7, "sources": [{
+                "id": "youtube-rss", "type": "rss", "platform": "YouTube",
+                "feed_urls": ["https://youtube.test/good", "https://youtube.test/stale"],
+            }]}
+            path = root / "config.json"
+            path.write_text(json.dumps(config), encoding="utf-8")
+            with mock.patch.object(maker_weekly, "request_bytes", side_effect=[feed, maker_weekly.ResourceNotFound("HTTP 404 from provider")]):
+                payload = maker_weekly.collect_raw_envelope(path, datetime(2026, 8, 9, 23, 59, 59, tzinfo=timezone.utc))
+        status = payload["source_status"][0]
+        self.assertEqual(status["status"], "error")
+        self.assertEqual(len(payload["items"]), 1)
+        self.assertEqual(status["coverage"]["feed_coverage"]["successful_feeds"], 1)
+        self.assertEqual(status["coverage"]["feed_coverage"]["total_feeds"], 2)
+        self.assertEqual(status["coverage"]["feed_coverage"]["failures"][0]["http_status"], 404)
+
+    def test_partial_rss_bundle_with_no_items_is_error_not_empty(self):
+        empty_feed = b"<feed xmlns='http://www.w3.org/2005/Atom'></feed>"
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            config = {"sources": [{
+                "id": "youtube-rss", "type": "rss", "platform": "YouTube",
+                "feed_urls": ["https://youtube.test/empty", "https://youtube.test/broken"],
+            }]}
+            path = root / "config.json"
+            path.write_text(json.dumps(config), encoding="utf-8")
+            with mock.patch.object(maker_weekly, "request_bytes", side_effect=[empty_feed, maker_weekly.ProviderServerError(500)]):
+                payload = maker_weekly.collect_raw_envelope(path, datetime(2026, 8, 9, tzinfo=timezone.utc))
+        self.assertEqual(payload["source_status"][0]["status"], "error")
+        self.assertEqual(payload["source_status"][0]["raw_count"], 0)
+
+    def test_complete_empty_rss_bundle_is_empty(self):
+        empty_feed = b"<feed xmlns='http://www.w3.org/2005/Atom'></feed>"
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            config = {"sources": [{
+                "id": "youtube-rss", "type": "rss", "platform": "YouTube",
+                "feed_urls": ["https://youtube.test/one", "https://youtube.test/two"],
+            }]}
+            path = root / "config.json"
+            path.write_text(json.dumps(config), encoding="utf-8")
+            with mock.patch.object(maker_weekly, "request_bytes", side_effect=[empty_feed, empty_feed]):
+                payload = maker_weekly.collect_raw_envelope(path, datetime(2026, 8, 9, tzinfo=timezone.utc))
+        status = payload["source_status"][0]
+        self.assertEqual(status["status"], "empty")
+        self.assertEqual(status["coverage"]["feed_coverage"]["success_ratio"], 1.0)
+
+    def test_all_blocked_rss_feeds_are_blocked_with_diagnostics(self):
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            config = {"sources": [{
+                "id": "reddit-rss", "type": "rss", "platform": "Reddit",
+                "feed_urls": ["https://reddit.test/one", "https://reddit.test/two"],
+            }]}
+            path = root / "config.json"
+            path.write_text(json.dumps(config), encoding="utf-8")
+            blocked = maker_weekly.AccessBlocked("HTTP 403 from provider")
+            with mock.patch.object(maker_weekly, "request_bytes", side_effect=[blocked, blocked]):
+                payload = maker_weekly.collect_raw_envelope(path, datetime(2026, 8, 9, tzinfo=timezone.utc))
+        status = payload["source_status"][0]
+        self.assertEqual(status["status"], "blocked")
+        self.assertEqual(status["coverage"]["feed_coverage"]["failed_feeds"], 2)
+
+    def test_partial_metric_enrichment_is_error_not_ok(self):
+        feed = b"""<feed xmlns='http://www.w3.org/2005/Atom'>
+        <entry><title>First robot</title><link href='https://youtube.test/watch?v=first01'/><published>2026-08-08T00:00:00Z</published></entry>
+        <entry><title>Second robot</title><link href='https://youtube.test/watch?v=second2'/><published>2026-08-07T00:00:00Z</published></entry>
+        </feed>"""
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            config = {"lookback_days": 7, "sources": [{
+                "id": "youtube-rss", "type": "rss", "platform": "YouTube",
+                "feed_url": "https://youtube.test/feed", "detail_enrichment": "youtube_public",
+            }]}
+            path = root / "config.json"
+            path.write_text(json.dumps(config), encoding="utf-8")
+
+            def fake_enrichment(_source, items, _context):
+                items[0]["metric_verification"] = {"status": "ok"}
+                items[1]["metric_verification"] = {"status": "error"}
+
+            with mock.patch.object(maker_weekly, "request_bytes", return_value=feed), \
+                    mock.patch.object(maker_weekly, "enrich_rss_details", side_effect=fake_enrichment):
+                payload = maker_weekly.collect_raw_envelope(path, datetime(2026, 8, 9, 23, 59, 59, tzinfo=timezone.utc))
+        status = payload["source_status"][0]
+        self.assertEqual(status["status"], "error")
+        self.assertEqual(status["coverage"]["detail_coverage"]["successful_items"], 1)
+        self.assertEqual(status["coverage"]["detail_coverage"]["error_items"], 1)
+
+    def test_request_bytes_retries_5xx_but_not_404(self):
+        server_error = urllib.error.HTTPError("https://youtube.test/feed", 500, "server error", {}, None)
+        with mock.patch.object(maker_weekly.urllib.request, "urlopen", side_effect=[server_error, server_error, server_error]) as urlopen, \
+                mock.patch.object(maker_weekly.time, "sleep"):
+            with self.assertRaises(maker_weekly.ProviderServerError):
+                maker_weekly.request_bytes("https://youtube.test/feed", 10)
+        self.assertEqual(urlopen.call_count, 3)
+
+        not_found = urllib.error.HTTPError("https://youtube.test/stale", 404, "not found", {}, None)
+        with mock.patch.object(maker_weekly.urllib.request, "urlopen", side_effect=not_found) as urlopen:
+            with self.assertRaises(maker_weekly.ResourceNotFound):
+                maker_weekly.request_bytes("https://youtube.test/stale", 10)
+        self.assertEqual(urlopen.call_count, 1)
+
+    def test_youtube_feed_rechecks_one_transient_404(self):
+        feed = b"<feed xmlns='http://www.w3.org/2005/Atom'></feed>"
+        source = {
+            "id": "youtube-rss", "type": "rss", "platform": "YouTube",
+            "feed_url": "https://www.youtube.com/feeds/videos.xml?channel_id=valid-channel",
+            "youtube_404_recheck_delay_seconds": 0,
+        }
+        context = {
+            "timeout": 10, "limit": 5, "since": datetime(2026, 8, 3, tzinfo=timezone.utc),
+            "as_of": datetime(2026, 8, 9, 23, 59, 59, tzinfo=timezone.utc),
+            "lookback_days": 7, "keywords": [],
+        }
+        with mock.patch.object(maker_weekly, "request_bytes", side_effect=[maker_weekly.ResourceNotFound("HTTP 404"), feed]) as request, \
+                mock.patch.object(maker_weekly.time, "sleep"):
+            self.assertEqual(maker_weekly.collect_rss(source, context), [])
+        self.assertEqual(request.call_count, 2)
+        coverage = context["_source_diagnostics"]["youtube-rss"]["feed_coverage"]
+        self.assertEqual(coverage["successful_feeds"], 1)
+        self.assertEqual(coverage["failed_feeds"], 0)
+
+    def test_request_bytes_retries_incomplete_response(self):
+        partial = http.client.IncompleteRead(b"partial", 100)
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b"complete"
+        with mock.patch.object(maker_weekly.urllib.request, "urlopen", side_effect=[partial, response]) as urlopen:
+            self.assertEqual(maker_weekly.request_bytes("https://youtube.test/watch", 10), b"complete")
+        self.assertEqual(urlopen.call_count, 2)
+
+    def test_request_bytes_retries_read_timeout(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b"complete"
+        with mock.patch.object(maker_weekly.urllib.request, "urlopen", side_effect=[TimeoutError("read timed out"), response]) as urlopen:
+            self.assertEqual(maker_weekly.request_bytes("https://youtube.test/watch", 10), b"complete")
+        self.assertEqual(urlopen.call_count, 2)
 
     def test_rss_rejects_items_after_as_of(self):
         feed = b"""<feed xmlns='http://www.w3.org/2005/Atom'><entry><title>Future item</title><link href='https://one.test/future'/><published>2026-08-13T00:00:00Z</published><summary>3D print project</summary></entry></feed>"""
@@ -743,6 +886,24 @@ class MakerWeeklyTests(unittest.TestCase):
         self.assertNotIn("本周项目", report)
         self.assertNotIn("入选理由", report)
         self.assertNotIn("Top 12", report)
+
+    def test_raw_audit_renderer_lists_failed_feed_urls(self):
+        payload = {
+            "selection_method": "raw-discovery-audit-only", "as_of": "2026-08-09T23:59:59Z",
+            "config_summary": {"final_top": 15}, "items": [],
+            "source_status": [{
+                "source_id": "youtube-rss", "platform": "YouTube", "status": "error", "count": 1,
+                "detail": "RSS feeds 28/29 succeeded",
+                "coverage": {"feed_coverage": {"failures": [{
+                    "url": "https://www.youtube.com/feeds/videos.xml?channel_id=stale",
+                    "category": "not_found", "http_status": 404, "error": "HTTP 404 from provider",
+                }]}},
+            }],
+        }
+        report = maker_weekly.render_markdown(payload)
+        self.assertIn("Feed 失败明细", report)
+        self.assertIn("channel_id=stale", report)
+        self.assertIn("HTTP 404", report)
 
     def test_execution_time_heat_can_qualify_an_older_completed_week(self):
         item = {"platform": "YouTube", "url": "https://youtube.com/watch?v=abcdef1", "metrics": {"views": 999999}, "metrics_captured_at": "2026-08-12T00:00:00Z"}

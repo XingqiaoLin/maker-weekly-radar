@@ -140,6 +140,18 @@ def annotate_time(item: dict[str, Any], start: datetime, end: datetime) -> dict[
     return {"status": "fail", "entry_type": None, "reason": "无法核验原始发布时间；严格本周首发规则下淘汰"}
 
 
+def aggregate_platform_statuses(statuses: list[dict[str, Any]]) -> dict[str, str]:
+    """Collapse multiple source records without allowing one success to hide a failure."""
+    priority = {"skipped": 1, "empty": 2, "ok": 3, "error": 4, "blocked": 5}
+    aggregated: dict[str, str] = {}
+    for status in statuses:
+        platform = str(status.get("platform") or "").lower()
+        value = str(status.get("status") or "error")
+        if priority.get(value, 4) >= priority.get(aggregated.get(platform, ""), 0):
+            aggregated[platform] = value
+    return aggregated
+
+
 def prepare_payload(payload: dict[str, Any], start: datetime, end: datetime) -> dict[str, Any]:
     result = deepcopy(payload)
     thresholds = (result.get("config_summary") or {}).get("heat_thresholds")
@@ -149,7 +161,7 @@ def prepare_payload(payload: dict[str, Any], start: datetime, end: datetime) -> 
         item["time_gate"] = annotate_time(item, start, end)
     statuses = result.get("source_status") or []
     stage_counts = result.get("stage_counts") if isinstance(result.get("stage_counts"), dict) else {}
-    covered = {str(status.get("platform") or "").lower(): status.get("status") for status in statuses}
+    covered = aggregate_platform_statuses(statuses)
     missing_social = [name for name in ("YouTube", "Reddit") if covered.get(name.lower()) not in {"ok", "empty"}]
     result["week"] = {
         "start": maker_weekly.iso_z(start), "end": maker_weekly.iso_z(end),

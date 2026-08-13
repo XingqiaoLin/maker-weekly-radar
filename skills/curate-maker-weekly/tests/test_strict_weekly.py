@@ -10,6 +10,16 @@ import strict_weekly  # noqa: E402
 
 
 class StrictWeeklyTests(unittest.TestCase):
+    def test_duplicate_platform_status_failure_cannot_be_hidden_by_success(self):
+        statuses = [
+            {"platform": "YouTube", "status": "error"},
+            {"platform": "YouTube", "status": "ok"},
+            {"platform": "Reddit", "status": "empty"},
+        ]
+        aggregated = strict_weekly.aggregate_platform_statuses(statuses)
+        self.assertEqual(aggregated["youtube"], "error")
+        self.assertEqual(aggregated["reddit"], "empty")
+
     def test_last_complete_week(self):
         window = strict_weekly.last_complete_week(date(2026, 8, 12))
         self.assertEqual(window["week_start"], "2026-08-03")

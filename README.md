@@ -9,6 +9,7 @@ It searches 13 public platforms, preserves raw discoveries for audit, requires d
 - Build a global Maker, DIY hardware, or 3D-printing project weekly.
 - Collect from Kickstarter, Indiegogo, GitHub, Hackaday, Hackster, Instructables, YouTube, Reddit, X, Instagram, Make Magazine, The Verge, and Tom's Hardware.
 - Use public no-key collection where it is reliable, with optional official API providers.
+- Report exact RSS bundle coverage. A partial YouTube/Reddit feed result is retained for audit but marked `error`, never `ok`; failed URLs and HTTP statuses are written to the audit artifacts.
 - Avoid per-repository GitHub README API calls, use 29+ verified YouTube channel feeds, cover 20+ Reddit communities through rate-limit-friendly bundles, and use official Kickstarter update feeds when campaign pages are challenged.
 - Accept project media plus documented multi-step fabrication as built-result evidence, and verify Reddit heat through approved Installed-App OAuth or audited original-page browser evidence.
 - Bound eligibility by the project's first-publication week while observing heat at report execution time, with the real metric capture timestamp preserved.
@@ -49,7 +50,7 @@ For a Codex browser fallback, save exact original-page observations in `social-e
 
 This writes `raw-discoveries.json`, `physical-candidates.json`, `researched.json`, and an explicitly non-publishable raw audit report. Only strict validated selections may become `final.json`.
 
-The collector fails closed when a platform blocks anonymous access or does not expose verifiable metrics. It does not bypass CAPTCHAs, login walls, rate limits, or Cloudflare challenges. See `skills/curate-maker-weekly/references/providers.md` for provider behavior and optional credentials.
+The collector fails closed when a platform blocks anonymous access or does not expose verifiable metrics. RSS 5xx, read timeouts, and incomplete responses receive bounded retries. YouTube Feed 404s receive one confirmation request before being reported as stale, because real runs showed intermittent false 404s. It does not bypass CAPTCHAs, login walls, rate limits, or Cloudflare challenges. See `skills/curate-maker-weekly/references/providers.md` for provider behavior and optional credentials.
 
 The bundled expanded-discovery heat profile uses Kickstarter `US$5,000 or 50 backers`, YouTube `25,000 views or 10,000 channel subscribers`, and Reddit `score + comments >= 500`. These lower gates increase the research pool only; every final selection still needs an original physical result, current-week first publication, maker authorship, visible process, five gates, three red lines, excellence evidence, and strict scoring.
 
